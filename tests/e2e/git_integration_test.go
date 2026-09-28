@@ -10,11 +10,13 @@ import (
 
 	git "github.com/go-git/go-git/v5"
 	"github.com/jenic/passgage/internal/gitstore"
+	"github.com/jenic/passgage/internal/testutil"
 )
 
 // This opt-in test writes .git only in a disposable temporary directory.
 // It is for CI/user execution, not the restricted development workspace.
 func TestFilesystemGit(t *testing.T) {
+	testutil.GitConfig(t, "")
 	dir := t.TempDir()
 	r, e := git.PlainInit(dir, false)
 	if e != nil {

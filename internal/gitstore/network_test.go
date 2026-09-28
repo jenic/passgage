@@ -9,9 +9,11 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport/client"
 	"github.com/go-git/go-git/v5/plumbing/transport/server"
 	"github.com/go-git/go-git/v5/storage/memory"
+	"github.com/jenic/passgage/internal/testutil"
 )
 
 func TestNativeSyncAndDivergence(t *testing.T) {
+	testutil.GitConfig(t, "")
 	t.Setenv("PASSGAGE_GIT_TOKEN", "")
 	remote, e := git.Init(memory.NewStorage(), memfs.New())
 	if e != nil {
