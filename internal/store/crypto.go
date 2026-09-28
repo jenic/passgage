@@ -300,7 +300,7 @@ func Initialize(c cfg.Config, passphrase string) error {
 		b = out.Bytes()
 	}
 	if err = writeExclusive(c.Identities, b); err != nil {
-		return err
+		return fmt.Errorf("create identity: %w", err)
 	}
 	if err = writeExclusive(c.Dir+"/.age-recipients", []byte(id.Recipient().String()+"\n")); err != nil {
 		return fmt.Errorf("identity saved, recipients creation failed: %w", err)
