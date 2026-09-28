@@ -1,0 +1,9 @@
+/vendor/
+/bin/
+/dist/
+/.gocache/
+/.gomodcache/
+/.cache/
+*.out
+*.swp
+go.work
