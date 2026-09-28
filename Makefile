@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := build
-.PHONY: fmt vet verify build test test-terminal test-integration test-reference test-desktop vuln release release-all verify-repro
+.PHONY: fmt vet verify build test test-terminal test-integration test-reference test-desktop vuln release release-all verify-repro pin-actions
 export GOCACHE := $(CURDIR)/.gocache
 export GOMODCACHE := $(CURDIR)/.gomodcache
 export GOPATH := $(CURDIR)/.cache/go
@@ -35,3 +35,5 @@ release-all: verify
 	go run $(GOFLAGS) ./internal/release -version '$(VERSION)'
 verify-repro: verify
 	go run $(GOFLAGS) ./internal/release -version '$(VERSION)' -verify
+pin-actions:
+	pinact run --update --verify-comment
