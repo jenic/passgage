@@ -30,7 +30,9 @@ func restrictFile(f *os.File) (err error) {
 	}
 
 	// Go opens writable files with GENERIC_WRITE, which does not include
-	// WRITE_DAC. Reopen the existing object with the ACL right instead of
+	// WRITE_DAC. SetSecurityInfo's file path also reads existing security
+	// information, so the reopened handle needs READ_CONTROL as well.
+	// Reopen the existing object with both security rights instead of
 	// resolving f.Name(): rooted files can have relative names, and a path
 	// lookup could target a different object after a rename or substitution.
 	if err = reOpenFile.Find(); err != nil {
@@ -43,7 +45,7 @@ func restrictFile(f *os.File) (err error) {
 	var handle windows.Handle
 	var reopenErr error
 	err = raw.Control(func(fd uintptr) {
-		r, _, callErr := reOpenFile.Call(fd, uintptr(windows.WRITE_DAC),
+		r, _, callErr := reOpenFile.Call(fd, uintptr(windows.READ_CONTROL|windows.WRITE_DAC),
 			uintptr(windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE), 0)
 		handle = windows.Handle(r)
 		if handle == windows.InvalidHandle {
@@ -54,7 +56,7 @@ func restrictFile(f *os.File) (err error) {
 		return fmt.Errorf("access file handle: %w", err)
 	}
 	if reopenErr != nil {
-		return fmt.Errorf("reopen file with WRITE_DAC: %w", reopenErr)
+		return fmt.Errorf("reopen file with READ_CONTROL|WRITE_DAC: %w", reopenErr)
 	}
 	defer func() {
 		if closeErr := windows.CloseHandle(handle); err == nil && closeErr != nil {

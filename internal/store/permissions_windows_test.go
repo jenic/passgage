@@ -60,6 +60,11 @@ func TestRestrictWritableFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertPrivateDACL(t, name)
+	// Applying the same protected ACL again must also succeed.
+	if err := restrictFile(f); err != nil {
+		t.Fatal("reapplying private DACL:", err)
+	}
+	assertPrivateDACL(t, name)
 	if _, err := f.WriteString("synthetic"); err != nil {
 		t.Fatal("original write handle was damaged:", err)
 	}
@@ -120,12 +125,23 @@ func TestRestrictClosedFileError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	raw, err := f.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+	// RawConn.Control does not normalize internal/poll's closed-file error
+	// to os.ErrClosed. Check that we preserve the actual underlying error,
+	// without relying on its implementation-specific text or identity.
+	controlErr := raw.Control(func(uintptr) { t.Fatal("accessed a closed handle") })
+	if controlErr == nil {
+		t.Fatal("raw control accepted a closed file")
+	}
 	err = restrictFile(f)
 	var pathErr *os.PathError
-	if !errors.Is(err, os.ErrClosed) || !errors.As(err, &pathErr) || pathErr.Path != f.Name() || pathErr.Op != "restrict permissions" {
+	if !errors.Is(err, controlErr) || !errors.As(err, &pathErr) || pathErr.Path != f.Name() || pathErr.Op != "restrict permissions" {
 		t.Fatalf("missing wrapped error context: %v", err)
 	}
 }
