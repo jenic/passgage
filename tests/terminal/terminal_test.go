@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -168,46 +169,143 @@ func session(t *testing.T, args []string, keys, response string) (string, result
 	go func() { done <- cmd.Wait() }()
 	var out strings.Builder
 	var sent, replied bool
-	for {
+	err = collectTerminalOutput(ctx, chunks, done, func(chunk string) {
+		out.WriteString(chunk)
+		text := out.String()
+		if !replied && strings.Contains(text, "\x1b[6n") {
+			_, _ = io.WriteString(master, response)
+			replied = true
+		}
+		if !sent && keys != "" && strings.Contains(text, "Ctrl+S save") {
+			_, _ = io.WriteString(master, keys)
+			sent = true
+		}
+	}, func() { _ = slave.Close() })
+	if err != nil {
+		t.Fatalf("terminal session: %v; output %q", err, out.String())
+	}
+	var r result
+	if err := json.NewDecoder(rp).Decode(&r); err != nil {
+		t.Fatal(err)
+	}
+	if !r.Restored || len(r.Residual) > 0 || r.Error != "" {
+		t.Fatalf("terminal state: %+v", r)
+	}
+	text := out.String()
+	if strings.Contains(text, "\x1b]10;?") || strings.Contains(text, "\x1b]11;?") || strings.Contains(text, "\x1b[6n") {
+		t.Fatalf("unexpected color/cursor query: %q", text)
+	}
+	return text, r
+}
+
+// PTY closure and cmd.Wait are independent events. Wait for both, accepting
+// either order, and keep the timeout active while draining final output.
+func collectTerminalOutput(ctx context.Context, chunks <-chan string, done <-chan error, output func(string), exited func()) error {
+	for chunks != nil || done != nil {
 		select {
 		case chunk, ok := <-chunks:
 			if !ok {
-				t.Fatal("PTY output closed before helper completed")
+				chunks = nil
+				continue
 			}
-			out.WriteString(chunk)
-			text := out.String()
-			if !replied && strings.Contains(text, "\x1b[6n") {
-				_, _ = io.WriteString(master, response)
-				replied = true
-			}
-			if !sent && keys != "" && strings.Contains(text, "Ctrl+S save") {
-				_, _ = io.WriteString(master, keys)
-				sent = true
-			}
+			output(chunk)
 		case err := <-done:
+			exited()
+			done = nil
 			if err != nil {
-				t.Fatalf("terminal helper: %v; output %q", err, out.String())
+				return fmt.Errorf("terminal helper: %w", err)
 			}
-			_ = slave.Close()
-			// Collect output already queued before process exit.
-			for chunk := range chunks {
-				out.WriteString(chunk)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+func TestCollectTerminalOutput(t *testing.T) {
+	for _, outputFirst := range []bool{true, false} {
+		t.Run(fmt.Sprintf("output-first=%v", outputFirst), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			chunks := make(chan string)
+			done := make(chan error)
+			exited := make(chan struct{})
+			finished := make(chan error, 1)
+			var out strings.Builder
+			go func() {
+				finished <- collectTerminalOutput(ctx, chunks, done, func(s string) { out.WriteString(s) }, func() { close(exited) })
+			}()
+			sendChunk := func(s string) {
+				t.Helper()
+				select {
+				case chunks <- s:
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				}
 			}
-			var r result
-			if err := json.NewDecoder(rp).Decode(&r); err != nil {
+			sendChunk("initial")
+			if outputFirst {
+				close(chunks)
+				select {
+				case err := <-finished:
+					t.Fatalf("returned before process completion: %v", err)
+				case <-time.After(20 * time.Millisecond):
+				}
+			}
+			select {
+			case done <- nil:
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			select {
+			case <-exited:
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			want := "initial"
+			if !outputFirst {
+				sendChunk("final")
+				close(chunks)
+				want += "final"
+			}
+			if err := <-finished; err != nil {
 				t.Fatal(err)
 			}
-			if !r.Restored || len(r.Residual) > 0 || r.Error != "" {
-				t.Fatalf("terminal state: %+v", r)
+			if out.String() != want {
+				t.Fatalf("output = %q, want %q", out.String(), want)
 			}
-			text := out.String()
-			if strings.Contains(text, "\x1b]10;?") || strings.Contains(text, "\x1b]11;?") || strings.Contains(text, "\x1b[6n") {
-				t.Fatalf("unexpected color/cursor query: %q", text)
-			}
-			return text, r
-		case <-ctx.Done():
-			t.Fatalf("terminal timed out: %q", out.String())
+		})
+	}
+}
+
+func TestCollectTerminalOutputErrors(t *testing.T) {
+	t.Run("helper failure after output closes", func(t *testing.T) {
+		chunks := make(chan string)
+		close(chunks)
+		done := make(chan error, 1)
+		want := errors.New("helper failed")
+		done <- want
+		err := collectTerminalOutput(context.Background(), chunks, done, func(string) {}, func() {})
+		if !errors.Is(err, want) {
+			t.Fatalf("error = %v, want %v", err, want)
 		}
+	})
+	for _, outputFirst := range []bool{true, false} {
+		t.Run(fmt.Sprintf("timeout/output-first=%v", outputFirst), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+			chunks := make(chan string)
+			done := make(chan error, 1)
+			if outputFirst {
+				close(chunks)
+			} else {
+				done <- nil
+			}
+			err := collectTerminalOutput(ctx, chunks, done, func(string) {}, func() {})
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("error = %v, want deadline exceeded", err)
+			}
+		})
 	}
 }
 
