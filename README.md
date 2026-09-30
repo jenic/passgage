@@ -27,6 +27,17 @@ Desktop builds have `CGO_ENABLED=0`; no C compiler or development libraries are
 required. A working graphical session is required only for clipboard operations.
 Windows users can run the released executable directly without Make or a shell.
 
+Run `make install` to build and install the binary into `/usr/local/bin` on
+Linux and macOS, or `%LOCALAPPDATA%/Programs/passgage` on Windows. Override the
+destination with `make install BINDIR="/path/to/bin"`. On Linux and macOS, the
+target automatically uses `sudo` for the installation commands when the
+destination requires elevated permissions. Run `make install` as your normal
+user so the build and Go caches remain owned by you. Writable destinations,
+such as `make install BINDIR="$HOME/.local/bin"`, do not require `sudo`.
+On Windows, run Make from a POSIX environment such as Git Bash with GNU Make
+and the `install` utility available. Add the installation directory to your
+user PATH if it is not already included.
+
 Dependencies are vendored. Make sets `GOCACHE`, `GOMODCACHE`, and `GOPATH` to
 project-local directories and runs `go mod verify` before building or testing.
 The first build can require downloading the pinned Go toolchain; subsequent

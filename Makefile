@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := build
-.PHONY: fmt vet verify build test test-terminal test-integration test-reference test-desktop vuln release release-all verify-repro pin-actions
+.PHONY: fmt vet verify build install test test-terminal test-integration test-reference test-desktop vuln release release-all verify-repro pin-actions
 export GOCACHE := $(CURDIR)/.gocache
 export GOMODCACHE := $(CURDIR)/.gomodcache
 export GOPATH := $(CURDIR)/.cache/go
@@ -8,6 +8,11 @@ export CGO_ENABLED := 0
 GOFLAGS := -mod=vendor
 VERSION ?= dev
 EXE := $(if $(filter Windows_NT,$(OS)),.exe,)
+ifeq ($(OS),Windows_NT)
+BINDIR ?= $(subst \,/,$(LOCALAPPDATA))/Programs/passgage
+else
+BINDIR ?= /usr/local/bin
+endif
 LDFLAGS := -s -w -buildid= -X github.com/jenic/passgage/internal/build.Version=$(VERSION)
 
 fmt:
@@ -18,6 +23,22 @@ vet: verify
 	go vet $(GOFLAGS) ./...
 build: fmt vet
 	go build $(GOFLAGS) -trimpath -buildvcs=false -ldflags '$(LDFLAGS)' -o bin/passgage$(EXE) ./cmd/passgage
+install: build
+ifeq ($(OS),Windows_NT)
+	@test -n "$(LOCALAPPDATA)" || { echo "LOCALAPPDATA must be set for Windows installation" >&2; exit 1; }
+	install -d "$(BINDIR)"
+	install -m 0755 "bin/passgage$(EXE)" "$(BINDIR)/passgage$(EXE)"
+else
+	@set -e; \
+	install_dir="$(BINDIR)"; \
+	while [ ! -e "$$install_dir" ]; do install_dir=$$(dirname "$$install_dir"); done; \
+	elevate=; \
+	if [ ! -w "$$install_dir" ] || { [ -e "$(BINDIR)/passgage" ] && [ ! -w "$(BINDIR)/passgage" ]; }; then \
+		elevate=sudo; \
+	fi; \
+	$$elevate install -d "$(BINDIR)"; \
+	$$elevate install -m 0755 bin/passgage "$(BINDIR)/passgage"
+endif
 test: fmt vet
 	go test $(GOFLAGS) $(TEST_FLAGS) ./...
 test-integration: verify
