@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := build
-.PHONY: fmt vet verify build install test test-completion test-release test-terminal test-integration test-reference test-desktop vuln release release-all verify-repro pin-actions
+.PHONY: fmt vet verify build install test test-completion test-release test-terminal test-integration test-reference test-desktop vuln release release-all verify-repro pin-actions publish-check publish
 export GOCACHE := $(CURDIR)/.gocache
 export GOMODCACHE := $(CURDIR)/.gomodcache
 export GOPATH := $(CURDIR)/.cache/go
@@ -7,6 +7,7 @@ export GOTOOLCHAIN := go1.27.1
 export CGO_ENABLED := 0
 GOFLAGS := -mod=vendor
 VERSION ?= dev
+export PUBLISH ?= 0
 EXE := $(if $(filter Windows_NT,$(OS)),.exe,)
 ifeq ($(OS),Windows_NT)
 BINDIR ?= $(subst \,/,$(LOCALAPPDATA))/Programs/passgage
@@ -60,5 +61,11 @@ release-all: verify
 	go run $(GOFLAGS) ./internal/release -version '$(VERSION)'
 verify-repro: verify
 	go run $(GOFLAGS) ./internal/release -version '$(VERSION)' -verify
+publish-check publish: export RELEASE_TAG = $(VERSION)
+publish-check:
+	@bash .github/scripts/publish.sh check
+publish: publish-check
+	$(MAKE) test test-release
+	@bash .github/scripts/publish.sh publish
 pin-actions:
 	pinact run --update --verify-comment
