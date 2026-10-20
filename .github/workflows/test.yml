@@ -37,6 +37,19 @@ jobs:
       - run: make test
       - run: make test-integration
       - run: make build
+      - name: Install shell completion test dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bash-completion zsh fish
+      - if: runner.os == 'Linux'
+        env:
+          PASSGAGE_COMPLETION_SHELLS: bash,zsh,fish
+        run: make test-completion
+      - if: runner.os == 'Windows'
+        env:
+          PASSGAGE_COMPLETION_SHELLS: powershell
+        run: make test-completion
       - if: runner.os != 'Windows'
         run: make test-terminal
       - if: runner.os == 'Linux'

@@ -8,9 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -88,25 +86,10 @@ func New(in io.Reader, out, errout io.Writer) *cobra.Command {
 	a.grep()
 	a.git()
 	comp := &cobra.Command{Use: "completion <bash|zsh|fish|powershell>", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, args []string) error {
-		switch args[0] {
-		case "bash":
-			return root.GenBashCompletionV2(c.OutOrStdout(), true)
-		case "zsh":
-			return root.GenZshCompletion(c.OutOrStdout())
-		case "fish":
-			return root.GenFishCompletion(c.OutOrStdout(), true)
-		case "powershell":
-			return root.GenPowerShellCompletionWithDesc(c.OutOrStdout())
-		default:
-			return fmt.Errorf("unsupported shell")
-		}
+		return a.generateCompletion(args[0], c.OutOrStdout())
 	}}
 	root.AddCommand(comp)
-	for _, c := range root.Commands() {
-		if c.Name() != "git" && c.Name() != "completion" {
-			c.ValidArgsFunction = a.complete
-		}
-	}
+	a.registerCompletions()
 	return root
 }
 
@@ -618,32 +601,6 @@ func (a *app) grep() {
 // ErrNoMatch is grep's quiet unsuccessful-match result.
 var ErrNoMatch = errors.New("no matching entries")
 
-func (a *app) complete(c *cobra.Command, args []string, prefix string) ([]string, cobra.ShellCompDirective) {
-	s, e := a.open(false)
-	if e != nil {
-		return nil, cobra.ShellCompDirectiveNoFileComp
-	}
-	defer s.Close()
-	names, e := s.List("")
-	if e != nil {
-		return nil, cobra.ShellCompDirectiveError
-	}
-	var result []string
-	dirs := map[string]bool{}
-	for _, n := range names {
-		if strings.HasPrefix(n, prefix) {
-			result = append(result, n)
-		}
-		for d := path.Dir(n); d != "."; d = path.Dir(d) {
-			if strings.HasPrefix(d, prefix) && !dirs[d] {
-				dirs[d] = true
-				result = append(result, d+"/")
-			}
-		}
-	}
-	sort.Strings(result)
-	return result, cobra.ShellCompDirectiveNoFileComp
-}
 func (a *app) git() {
 	c := &cobra.Command{Use: "git <command> [args]", DisableFlagParsing: true, Args: cobra.MinimumNArgs(1), RunE: func(c *cobra.Command, args []string) error {
 		conf, e := a.config()

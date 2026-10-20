@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := build
-.PHONY: fmt vet verify build install test test-release test-terminal test-integration test-reference test-desktop vuln release release-all verify-repro pin-actions
+.PHONY: fmt vet verify build install test test-completion test-release test-terminal test-integration test-reference test-desktop vuln release release-all verify-repro pin-actions
 export GOCACHE := $(CURDIR)/.gocache
 export GOMODCACHE := $(CURDIR)/.gomodcache
 export GOPATH := $(CURDIR)/.cache/go
@@ -41,6 +41,8 @@ else
 endif
 test: fmt vet
 	go test $(GOFLAGS) $(TEST_FLAGS) ./...
+test-completion: build
+	PASSGAGE_BINARY="$(CURDIR)/bin/passgage$(EXE)" go test $(GOFLAGS) -tags=completion -timeout=180s ./tests/completion
 test-release:
 	python3 -B -m unittest discover -s .github/scripts -p 'test_*.py'
 test-integration: verify

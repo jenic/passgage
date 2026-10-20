@@ -135,6 +135,17 @@ func (s *Store) IsDir(name string) bool {
 
 // List returns sorted logical entry names, excluding metadata and symlinks.
 func (s *Store) List(prefix string) ([]string, error) {
+	return s.list(prefix, false)
+}
+
+// ListDirectories returns sorted logical directory names, including empty
+// directories and the prefix itself, excluding the store root, metadata and symlinks.
+// A nonempty prefix must name an existing directory within the store.
+func (s *Store) ListDirectories(prefix string) ([]string, error) {
+	return s.list(prefix, true)
+}
+
+func (s *Store) list(prefix string, directories bool) ([]string, error) {
 	base := "."
 	if prefix != "" {
 		var err error
@@ -158,6 +169,14 @@ func (s *Store) List(prefix string) ([]string, error) {
 			return nil
 		}
 		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if directories {
+			if d.IsDir() && p != "." {
+				names = append(names, p)
+			} else if p == base && !d.IsDir() {
+				return fmt.Errorf("not a store directory: %s", p)
+			}
 			return nil
 		}
 		if !d.IsDir() && strings.HasSuffix(p, ".age") {

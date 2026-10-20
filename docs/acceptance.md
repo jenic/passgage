@@ -6,6 +6,27 @@ filesystem Git metadata writes), `make test-desktop` (requires a graphical sessi
 replaces clipboard contents), and `make verify-repro`. Run the following on a
 disposable store before adopting a release. Never use real secrets as test fixtures.
 
+## Shell completion
+
+Generate and load the adapter using the README instructions in Bash, Zsh, Fish,
+and PowerShell. Use a disposable store with nested entries, an empty directory,
+and names containing spaces, a single quote, and Unicode.
+
+1. Complete both `passgage <entry>` and `passgage show <entry>`, including aliases
+   and `-c2`. Confirm logical names appear without `.age` and can be selected safely.
+2. Complete a directory and continue typing within it without removing an inserted
+   space. Check a mixed entry/directory result set; an explicitly typed space may
+   be needed after selecting a terminal entry.
+3. Complete both copy/move arguments and `reencrypt --path`. Verify the latter
+   offers empty directories and excludes files.
+4. Check that generation lengths, grep patterns, and unmatched store paths do not
+   suggest unrelated files in the current directory. Repeat with a missing store.
+5. Repeat without an identity file. Completion must not prompt, decrypt entries,
+   create a store or lock, or change existing ciphertext.
+
+`make test-completion` automates these cases on supported CI shells. Repeat the
+manual checks with your own shell configuration or third-party completion framework.
+
 ## Desktop clipboard
 
 Run on macOS, Windows, Linux/X11, and Linux/Wayland with a supported data-control
