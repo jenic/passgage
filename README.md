@@ -67,6 +67,68 @@ passgage generate service/account
 permissions. Initialization never replaces an existing identity or recipients
 file. Hardware-token provisioning remains the plugin's responsibility.
 
+## GitHub releases
+
+Pushing a `v`-prefixed SemVer tag, such as `v1.2.3` or `v1.2.3-rc.1`, starts
+the release workflow. The tag must include the release workflow changes. A
+maintainer creates and pushes the tag; the workflow does not create or move tags.
+Prerelease tags produce GitHub prereleases and are not marked as Latest.
+
+Publication waits for the full existing CI suite, including Linux, macOS, and
+Windows checks and cross-build reproducibility. The workflow then builds the
+tagged commit with `make release-all VERSION=<tag>`, preserving the full tag in
+`passgage version`. Fresh runners download and verify the pinned modules before
+generating the ignored vendor directory and building with `-mod=vendor`.
+
+Each release contains six platform archives, `SHA256SUMS`, and a corresponding
+`<filename>.sigstore.json` bundle for each of those seven files. Archive names
+remain `passgage_<os>_<arch>.tar.gz` for Linux/macOS and
+`passgage_windows_<arch>.zip` for Windows. GitHub's automatically generated source
+archives are not part of this signed set.
+
+Signing uses Cosign v3.0.6, GitHub Actions OIDC, and the public Sigstore services.
+No signing-key secret is needed. Repository Actions policy must allow the pinned
+actions and permit the publication job's `contents: write` and `id-token: write`
+permissions. The runner needs access to GitHub, Go module downloads, and Sigstore.
+The signing identity and artifact digests are recorded in public transparency logs.
+
+All signatures are verified before upload. Assets are attached to a draft,
+downloaded and verified again, and only then published with generated release
+notes. This ordering also supports repositories with immutable releases enabled.
+An upload or verification failure leaves the release unpublished; use GitHub
+Actions' rerun controls to retry. Reruns replace the expected assets on an existing
+draft. Unexpected assets block publication and need maintainer review. An already
+published release is never intentionally modified; corrections use a new version
+tag. The workflow also refuses publication if the remote tag has moved away from
+the triggering commit.
+
+To verify a download, install [Cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
+v3.0.6 or newer and download the archive, `SHA256SUMS`, and both corresponding
+bundles from the same release. For example, on Linux amd64:
+
+```sh
+tag=v1.2.3 # replace with the release being verified
+asset=passgage_linux_amd64.tar.gz
+identity="https://github.com/jenic/passgage/.github/workflows/release.yml@refs/tags/$tag"
+issuer=https://token.actions.githubusercontent.com
+
+cosign verify-blob --bundle "$asset.sigstore.json" \
+  --certificate-identity "$identity" --certificate-oidc-issuer "$issuer" "$asset"
+cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity "$identity" --certificate-oidc-issuer "$issuer" SHA256SUMS
+awk -v asset="$asset" '$2 == asset' SHA256SUMS | sha256sum --check --strict -
+```
+
+Use the exact release tag and workflow identity when verifying. Direct archive
+signature verification works for every platform; the final checksum command
+above uses GNU tools. See [Sigstore's verification documentation](https://docs.sigstore.dev/cosign/verifying/verify/)
+for the bundle format and identity checks.
+
+`make test-release` runs offline release automation tests using Python 3 and Bash.
+The tests simulate GitHub and Cosign; they do not publish releases or contact
+Sigstore. Full OIDC signing and publication are validated with a maintainer-created
+prerelease tag after merging the workflow.
+
 ## Commands
 
 | Command | Behavior |
