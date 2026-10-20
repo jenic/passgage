@@ -101,8 +101,9 @@ class PublishTests(unittest.TestCase):
         self.scratch.mkdir()
         self.env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}",
                         FIXTURE=str(self.root), NOTES=NOTES, PUBLISH="0", TMPDIR=str(self.scratch))
-        # Keep an outer make's flags and jobserver out of the independent fixtures.
-        for name in ["MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES"]:
+        # Make also exports command-line variables separately from its flags.
+        # Keep release values and the jobserver out of the independent fixtures.
+        for name in ["MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "VERSION", "RELEASE_TAG"]:
             self.env.pop(name, None)
 
     def run_make(self, target="publish", version="v1.2.3", success=True, **env):
