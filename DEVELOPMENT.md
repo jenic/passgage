@@ -99,25 +99,34 @@ tests. Cross-compilation does not establish that a desktop clipboard or a physic
 token was exercised.
 
 `make test-release` runs offline release automation tests using Python 3 and Bash.
-The tests simulate Git, git-cliff, GitHub, and Cosign; they do not create real tags,
-publish releases, or contact Sigstore. Full OIDC signing and publication are
-validated with a maintainer-created prerelease tag after merging the workflow.
+The tests simulate Git, git-cliff, Go, GitHub, and Cosign; they do not create real
+tags, contact the Go proxy, publish releases, or contact Sigstore. Full OIDC signing
+and publication are validated with a maintainer-created prerelease tag after
+merging the workflow.
 
 ## Publishing and releases
 
 Pushing a `v`-prefixed SemVer tag, such as `v1.2.3` or `v1.2.3-rc.1`, starts
 the release workflow. The tag must include the release workflow changes. A
 maintainer creates and pushes the tag; the workflow does not create or move tags.
+Local publishing and the workflow both require a publishable module path in
+`go.mod` and a matching Go module version. The current path supports v0 and v1;
+v2 and later require a matching `/vN` suffix and updated imports. Tags with
+`+build` metadata (including `+incompatible`) are rejected.
 Prerelease tags produce GitHub prereleases and are not marked as Latest.
 
 Use `make publish-check VERSION=v1.2.3` to validate the tag and publishing
 prerequisites without running tests or creating a tag. This requires Bash, Git,
-and `git-cliff`, a clean worktree (including no untracked files), and an `origin`
+Go, and `git-cliff`, a clean worktree (including no untracked files), and an `origin`
 remote. The tag must be a valid `v`-prefixed SemVer and must not already exist
 locally or on `origin`. Checking remote tags requires network access.
 
-Run `make publish VERSION=v1.2.3` to run those checks, `make test`, and
-`make test-release`. It then stops with instructions to opt in. After committing
+Run `make publish VERSION=v1.2.3` to run those checks, `make module-check`,
+`make test`, and `make test-release`. The module check runs `go mod verify` and
+`go mod tidy -diff`; it reports required changes without rewriting `go.mod` or
+`go.sum` and can require network access for dependencies absent from the cache.
+Resolve and commit any dependency changes and regenerate vendor before retrying.
+Publishing then stops with instructions to opt in. After committing
 all release changes, including `cliff.toml`, publish with:
 
 ```sh
@@ -126,17 +135,27 @@ make publish VERSION=v1.2.3 PUBLISH=1
 
 This repeats the checks and tests, generates notes using
 `git-cliff --unreleased --tag v1.2.3`, creates a signed annotated tag with those
-notes, and pushes only that tag to `origin`. Configure Git tag signing and your
+notes, and pushes only that tag to `origin`. It then requests Go proxy indexing
+using `GOPROXY=proxy.golang.org go list -mod=readonly -m <module>@<tag>`, with the
+pinned toolchain and local caches. Configure Git tag signing and your
 signing key first. A failed notes-generation or signing step stops before the
 push. If pushing fails after the tag is created, inspect the local tag and remote
 state before retrying the push manually; publishing refuses to replace tags.
 GitHub Actions builds and publishes the binaries after the tag is pushed.
 
+If indexing fails, the tag remains pushed and GitHub Actions can continue.
+After resolving the proxy error or allowing time for the tag to become visible,
+retry only the lookup with `make index-module VERSION=v1.2.3`. This command
+validates the module/version but does not require a clean worktree, run tests,
+create tags, or push anything. For tags pushed manually, run this command to
+request indexing; the release workflow does not request it automatically.
+
 Publication waits for the full existing CI suite, including Linux, macOS, and
 Windows checks and cross-build reproducibility. The workflow then builds the
 tagged commit with `make release-all VERSION=<tag>`, preserving the full tag in
-`passgage version`. Fresh runners download and verify the pinned modules before
-generating the ignored vendor directory and building with `-mod=vendor`.
+`passgage version`. Fresh runners download the pinned modules, verify them and
+check dependency tidiness with `make module-check`, generate the ignored vendor
+directory, and build with `-mod=vendor`.
 
 Signing uses Cosign v3.0.6, GitHub Actions OIDC, and the public Sigstore services.
 No signing-key secret is needed. Repository Actions policy must allow the pinned

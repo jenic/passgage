@@ -7,7 +7,7 @@ fail() { echo "publish: $*" >&2; exit 1; }
 check() {
   # Keep local publishing and the tag-triggered workflow on the same SemVer rules.
   bash "$(dirname "$0")/release.sh" metadata >/dev/null
-  for tool in git git-cliff; do
+  for tool in git git-cliff go; do
     command -v "$tool" >/dev/null 2>&1 || fail "$tool is required before publishing."
   done
   [[ $(git rev-parse --is-inside-work-tree) == true ]] || fail 'A Git worktree is required.'
@@ -23,6 +23,18 @@ check() {
     result=$?
     [[ $result == 2 ]] || fail 'Unable to check tags on origin.'
   fi
+}
+
+index_module() {
+  local metadata key value module_path=
+  metadata=$(bash "$(dirname "$0")/release.sh" metadata)
+  while IFS='=' read -r key value; do
+    if [[ $key == module_path ]]; then module_path=$value; fi
+  done <<< "$metadata"
+  [[ -n $module_path ]] || fail 'Unable to determine the module path.'
+  echo "Requesting Go proxy indexing for $module_path@$RELEASE_TAG..."
+  # Override automatic vendor mode and private-module proxy bypass settings.
+  GOPROXY=proxy.golang.org GONOPROXY=none go list -mod=readonly -m "$module_path@$RELEASE_TAG"
 }
 
 publish() (
@@ -44,10 +56,13 @@ publish() (
   git tag -s --cleanup=verbatim -F "$tag_message_file" "$RELEASE_TAG" "$commit"
   echo "Pushing $RELEASE_TAG to origin..."
   git push origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+  bash "$0" index-module ||
+    fail "Tag $RELEASE_TAG was pushed, but Go proxy indexing failed. Retry: make index-module VERSION=$RELEASE_TAG"
 )
 
 case ${1:-} in
   check) check ;;
   publish) publish ;;
-  *) fail 'usage: publish.sh check|publish' ;;
+  index-module) index_module ;;
+  *) fail 'usage: publish.sh check|publish|index-module' ;;
 esac

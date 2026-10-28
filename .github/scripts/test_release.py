@@ -84,6 +84,7 @@ class ReleaseTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        (self.root / "go.mod").write_text("module github.com/jenic/passgage\n")
         self.dist = self.root / "dist"
         self.dist.mkdir()
         for name in ARCHIVES:
@@ -106,7 +107,7 @@ class ReleaseTests(unittest.TestCase):
 
     def run_release(self, command, success=True, **env):
         result = subprocess.run(["bash", str(SCRIPT), command, str(self.dist)],
-                                env=dict(self.env, **env), text=True, capture_output=True)
+                                cwd=self.root, env=dict(self.env, **env), text=True, capture_output=True)
         self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
         return result
 
@@ -116,14 +117,43 @@ class ReleaseTests(unittest.TestCase):
 
     def test_semver_and_prerelease_detection(self):
         for tag, prerelease in [("v0.0.0", False), ("v1.2.3-rc.1", True),
-                                ("v1.2.3-0+build", True), ("v1.2.3+build-with-hyphen", False)]:
+                                ("v1.2.3-0", True), ("v1.2.3", False)]:
             with self.subTest(tag=tag):
                 output = self.run_release("metadata", RELEASE_TAG=tag).stdout
                 self.assertIn(f"tag={tag}\n", output)
                 self.assertIn(f"prerelease={str(prerelease).lower()}\n", output)
-        for tag in ["1.2.3", "v1", "v01.2.3", "v1.2.3-01", "v1.2.3-", "v1.2.3+", "v1.2.3\n", "v1.2.3;echo bad"]:
+                self.assertIn("module_path=github.com/jenic/passgage\n", output)
+        for tag in ["1.2.3", "v1", "v01.2.3", "v1.2.3-01", "v1.2.3-", "v1.2.3+", "v1.2.3\n",
+                    "v1.2.3;echo bad", "v1.2.3+build-with-hyphen", "v1.2.3-0+build", "v1.2.3+incompatible"]:
             with self.subTest(tag=tag):
                 self.run_release("metadata", success=False, RELEASE_TAG=tag)
+        self.assertEqual(self.calls(), [])
+
+    def test_module_path_and_major_version_validation(self):
+        for module, tag, success in [
+            ("github.com/jenic/passgage", "v0.1.0", True),
+            ('"github.com/jenic/passgage"', "v1.0.0", True),
+            ("github.com/jenic/passgage", "v2.0.0", False),
+            ("github.com/jenic/passgage/v2", "v2.0.0", True),
+            ("github.com/jenic/passgage/v2", "v2.0.0-rc.1", True),
+            ("github.com/jenic/passgage/v2", "v1.0.0", False),
+            ("github.com/jenic/passgage/v2", "v3.0.0", False),
+            ("github.com/jenic/passgage/v0", "v0.1.0", False),
+            ("github.com/jenic/passgage/v1", "v1.0.0", False),
+            ("github.com/jenic/passgage/v02", "v2.0.0", False),
+            ("github.com/jenic/passgage/v10", "v10.0.0", True),
+            ("passgage", "v1.0.0", False),
+            ("", "v1.0.0", False),
+            ("github.com/jenic//passgage", "v1.0.0", False),
+            ("github.com/jenic/../passgage", "v1.0.0", False),
+            ("github.com/jenic/passgage.", "v1.0.0", False),
+            ("github.com/jenic/passgage extra", "v1.0.0", False),
+        ]:
+            with self.subTest(module=module, tag=tag):
+                (self.root / "go.mod").write_text(f"module {module}\n")
+                self.run_release("metadata", RELEASE_TAG=tag, success=success)
+        (self.root / "go.mod").unlink()
+        self.run_release("metadata", success=False)
         self.assertEqual(self.calls(), [])
 
     def test_asset_set_and_checksums(self):

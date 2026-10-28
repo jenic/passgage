@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := build
-.PHONY: fmt vet verify build install test test-completion test-release test-terminal test-integration test-reference test-desktop vuln release release-all verify-repro pin-actions publish-check publish
+.PHONY: fmt vet verify module-check build install test test-completion test-release test-terminal test-integration test-reference test-desktop vuln release release-all verify-repro pin-actions publish-check publish index-module
 export GOCACHE := $(CURDIR)/.gocache
 export GOMODCACHE := $(CURDIR)/.gomodcache
 export GOPATH := $(CURDIR)/.cache/go
@@ -20,6 +20,8 @@ fmt:
 	gofmt -w cmd internal store agecrypto tests
 verify:
 	go mod verify
+module-check: verify
+	go mod tidy -diff
 vet: verify
 	go vet $(GOFLAGS) ./...
 build: fmt vet
@@ -61,11 +63,14 @@ release-all: verify
 	go run $(GOFLAGS) ./internal/release -version '$(VERSION)'
 verify-repro: verify
 	go run $(GOFLAGS) ./internal/release -version '$(VERSION)' -verify
-publish-check publish: export RELEASE_TAG = $(VERSION)
+publish-check publish index-module: export RELEASE_TAG = $(VERSION)
 publish-check:
 	@bash .github/scripts/publish.sh check
 publish: publish-check
+	$(MAKE) module-check
 	$(MAKE) test test-release
 	@bash .github/scripts/publish.sh publish
+index-module:
+	@bash .github/scripts/publish.sh index-module
 pin-actions:
 	pinact run --update --verify-comment

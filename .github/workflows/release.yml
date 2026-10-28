@@ -58,7 +58,7 @@ jobs:
       - name: Prepare vendored dependencies
         run: |
           go mod download
-          make verify
+          make module-check
           go mod vendor
       - run: make release-all VERSION="$RELEASE_TAG"
       - run: bash .github/scripts/release.sh check-assets dist

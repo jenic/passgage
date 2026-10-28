@@ -53,6 +53,12 @@ pre-v1 release policy: minor releases may change public APIs until v1.
 Import the public packages from another Go project;
 there is no separate library module or store-format migration.
 
+Add a released version to your project (replace `v0.1.0` with the desired tag):
+
+```sh
+go get github.com/jenic/passgage@v0.1.0
+```
+
 For an existing passage store, configure paths explicitly:
 
 ```go

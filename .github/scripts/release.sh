@@ -7,13 +7,44 @@ fail() { echo "release: $*" >&2; exit 1; }
 validate_tag() {
   local number='(0|[1-9][0-9]*)'
   local identifier='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
-  local pattern="^v${number}\\.${number}\\.${number}(-${identifier}(\\.${identifier})*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$"
-  [[ ${RELEASE_TAG:-} =~ $pattern ]] || fail 'expected a v-prefixed SemVer tag'
+  local pattern="^v${number}\\.${number}\\.${number}(-${identifier}(\\.${identifier})*)?$"
+  [[ ${RELEASE_TAG:-} =~ $pattern ]] || fail 'expected a v-prefixed SemVer tag without build metadata'
+}
+
+validate_module() {
+  local directive path rest component major path_major
+  module_path=
+  [[ -f go.mod ]] || fail 'go.mod is required in the module root.'
+  while read -r directive path rest; do
+    if [[ $directive == module ]]; then
+      [[ -z $rest || $rest == //* ]] || fail 'invalid module directive in go.mod.'
+      module_path=$path
+      # Go permits quoted module paths as well as the usual unquoted form.
+      if [[ $module_path == \"*\" ]]; then module_path=${module_path:1:${#module_path}-2}; fi
+      break
+    fi
+  done < go.mod
+  local host='[a-z0-9]([a-z0-9-]*[a-z0-9])?'
+  local pattern="^(${host}\\.)+${host}(/[A-Za-z0-9_~.-]+)+$"
+  [[ $module_path =~ $pattern ]] || fail "Module path '$module_path' is not a publishable import path."
+  local components=()
+  IFS=/ read -r -a components <<< "$module_path"
+  for component in "${components[@]}"; do
+    [[ $component != .* && $component != *. ]] || fail "Invalid module path component: $component"
+  done
+  major=${RELEASE_TAG#v}
+  major=${major%%.*}
+  if [[ $module_path =~ /v([0-9]+)$ ]]; then
+    path_major=${BASH_REMATCH[1]}
+    [[ $path_major =~ ^([2-9]|[1-9][0-9]+)$ && $path_major == "$major" ]] ||
+      fail "Module path suffix /v$path_major does not match VERSION $RELEASE_TAG (suffixes start at /v2)."
+  else
+    [[ $major == 0 || $major == 1 ]] || fail "VERSION $RELEASE_TAG requires the module path to end with /v$major."
+  fi
 }
 
 prerelease() {
-  local version=${RELEASE_TAG%%+*}
-  if [[ $version == *-* ]]; then echo true; else echo false; fi
+  if [[ $RELEASE_TAG == *-* ]]; then echo true; else echo false; fi
 }
 
 archives=(
@@ -110,7 +141,10 @@ publish() (
 
 validate_tag
 case ${1:-} in
-  metadata) printf 'tag=%s\nprerelease=%s\n' "$RELEASE_TAG" "$(prerelease)" ;;
+  metadata)
+    validate_module
+    printf 'tag=%s\nprerelease=%s\nmodule_path=%s\n' "$RELEASE_TAG" "$(prerelease)" "$module_path"
+    ;;
   check-assets) check_assets "${2:?artifact directory required}" "${3:-unsigned}" ;;
   sign) sign_assets "${2:?artifact directory required}" ;;
   publish) publish "${2:?artifact directory required}" ;;

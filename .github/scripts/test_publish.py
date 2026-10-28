@@ -60,12 +60,21 @@ elif tool == "git-cliff":
     fail("FAIL_CLIFF")
 elif tool == "go":
     assert args in [["mod", "verify"], ["vet", "-mod=vendor", "./..."],
-                    ["test", "-mod=vendor", "./..."]]
+                    ["test", "-mod=vendor", "./..."], ["mod", "tidy", "-diff"],
+                    ["list", "-mod=readonly", "-m", os.getenv("MODULE_PATH", "github.com/jenic/passgage")
+                     + "@" + os.environ.get("RELEASE_TAG", "")]]
     assert os.environ["GOCACHE"] == str(p.cwd() / ".gocache")
     assert os.environ["GOMODCACHE"] == str(p.cwd() / ".gomodcache")
+    assert os.environ["GOTOOLCHAIN"] == "go1.27.1"
+    if args == ["mod", "verify"]: fail("FAIL_VERIFY")
+    if args == ["mod", "tidy", "-diff"]: fail("FAIL_TIDY")
     if args[0] == "test":
         (root / "tested").touch()
         fail("FAIL_TEST")
+    if args[0] == "list":
+        assert os.environ["GOPROXY"] == "proxy.golang.org"
+        assert os.environ["GONOPROXY"] == "none"
+        fail("FAIL_INDEX")
 elif tool == "gofmt":
     assert args == ["-w", "cmd", "internal", "store", "agecrypto", "tests"]
 else: raise AssertionError(tool)
@@ -81,6 +90,7 @@ class PublishTests(unittest.TestCase):
         scripts = self.worktree / ".github/scripts"
         scripts.mkdir(parents=True)
         shutil.copyfile(MAKEFILE, self.worktree / "Makefile")
+        (self.worktree / "go.mod").write_text("module github.com/jenic/passgage\n\ngo 1.26.0\n")
         for name in ["publish.sh", "release.sh"]:
             shutil.copyfile(SCRIPTS / name, scripts / name)
         # The recursive make uses the real test-release recipe, with an isolated test.
@@ -123,21 +133,35 @@ class PublishTests(unittest.TestCase):
     def writes(self):
         return [c for c in self.calls() if c[:3] in (["git", "tag", "-s"], ["git", "push", "origin"])]
 
+    def index_calls(self):
+        return [c for c in self.calls() if c[:2] == ["go", "list"]]
+
     def test_check_accepts_release_versions_without_tests_or_writes(self):
-        for tag in ["v0.0.0", "v1.2.3-rc.1", "v2.0.0", "v1.2.3+build-with-hyphen"]:
+        for tag in ["v0.0.0", "v1.2.3", "v1.2.3-rc.1"]:
             with self.subTest(tag=tag):
                 self.run_make("publish-check", version=tag)
         self.assertFalse((self.root / "tested").exists())
         self.assertFalse((self.root / "release-tested").exists())
         self.assertEqual(self.writes(), [])
+        self.assertEqual([c for c in self.calls() if c[0] == "go"], [])
 
     def test_invalid_versions_stop_before_tools(self):
         for tag in [None, "", "1.2.3", "v01.2.3", "v1.2.3-01", "v1.2.3+", "v1.2.3\n",
+                    "v2.0.0", "v1.2.3+build", "v1.2.3-rc.1+build", "v1.2.3+incompatible",
                     "v1.2.3';echo bad", "v1.2.3;touch injected", "v1.2.3`touch injected`"]:
             with self.subTest(tag=tag):
                 self.run_make("publish-check", version=tag, success=False)
         self.assertEqual(self.calls(), [])
         self.assertFalse((self.worktree / "injected").exists())
+
+    def test_invalid_module_path_stops_before_tools(self):
+        for module in ["", "passgage", "github.com/jenic/passgage/v1", "github.com/jenic/passgage/v2"]:
+            with self.subTest(module=module):
+                (self.worktree / "go.mod").write_text(f"module {module}\n")
+                self.run_make("publish-check", success=False)
+        (self.worktree / "go.mod").unlink()
+        self.run_make("publish-check", success=False)
+        self.assertEqual(self.calls(), [])
 
     def test_failed_preconditions_stop_before_tests(self):
         for failure in ["NO_GIT", "FAIL_STATUS", "DIRTY", "NO_ORIGIN", "FAIL_TAG_LIST",
@@ -146,6 +170,7 @@ class PublishTests(unittest.TestCase):
                 self.run_make(success=False, PUBLISH="1", **{failure: "1"})
         self.assertFalse((self.root / "tested").exists())
         self.assertEqual(self.writes(), [])
+        self.assertEqual(self.index_calls(), [])
 
     def test_git_cliff_is_required(self):
         (self.root / "tools/git-cliff").unlink()
@@ -177,6 +202,52 @@ class PublishTests(unittest.TestCase):
         self.assertFalse(Path(writes[0][5]).exists())
         calls = self.calls()
         self.assertLess(calls.index(["go", "test", "-mod=vendor", "./..."]), calls.index(writes[0]))
+        self.assertLess(calls.index(["go", "mod", "verify"]), calls.index(["go", "mod", "tidy", "-diff"]))
+        self.assertLess(calls.index(["go", "mod", "tidy", "-diff"]),
+                        calls.index(["go", "test", "-mod=vendor", "./..."]))
+        self.assertEqual(self.index_calls(), [["go", "list", "-mod=readonly", "-m",
+                                               "github.com/jenic/passgage@v1.2.3"]])
+        self.assertLess(calls.index(writes[1]), calls.index(self.index_calls()[0]))
+
+    def test_module_check_failures_prevent_tests_and_tagging(self):
+        for failure in ["FAIL_VERIFY", "FAIL_TIDY"]:
+            with self.subTest(failure=failure):
+                self.run_make(success=False, PUBLISH="1", **{failure: "1"})
+        self.assertFalse((self.root / "tested").exists())
+        self.assertFalse((self.root / "release-tested").exists())
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.index_calls(), [])
+
+    def test_module_check_verifies_then_checks_tidiness(self):
+        self.run_make("module-check")
+        self.assertEqual(self.calls(), [["go", "mod", "verify"], ["go", "mod", "tidy", "-diff"]])
+
+    def test_index_failure_reports_pushed_tag_and_retry_command(self):
+        result = self.run_make(success=False, PUBLISH="1", FAIL_INDEX="1")
+        self.assertEqual(len(self.writes()), 2)
+        self.assertEqual(len(self.index_calls()), 1)
+        self.assertIn("Tag v1.2.3 was pushed", result.stderr)
+        self.assertIn("make index-module VERSION=v1.2.3", result.stderr)
+
+    def test_independent_index_retry_skips_git_checks_tests_and_tagging(self):
+        self.run_make("index-module", DIRTY="1", LOCAL_TAG="1", REMOTE_TAG="1", NO_ORIGIN="1",
+                      GOPROXY="off", GONOPROXY="*", GOFLAGS="-mod=vendor")
+        self.assertEqual(self.calls(), [["go", "list", "-mod=readonly", "-m",
+                                         "github.com/jenic/passgage@v1.2.3"]])
+
+    def test_index_uses_declared_module_path_and_prerelease(self):
+        module = "github.com/jenic/passgage/v2"
+        (self.worktree / "go.mod").write_text(f"module {module}\n")
+        self.run_make("index-module", version="v2.0.0-rc.1", MODULE_PATH=module)
+        self.assertEqual(self.index_calls()[0][-1], module + "@v2.0.0-rc.1")
+
+    def test_independent_index_failure_is_reported(self):
+        self.run_make("index-module", success=False, FAIL_INDEX="1")
+        self.assertEqual(self.writes(), [])
+
+    def test_independent_index_rejects_invalid_version_before_lookup(self):
+        self.run_make("index-module", version="v2.0.0", success=False)
+        self.assertEqual(self.calls(), [])
 
     def test_test_failures_prevent_tag_creation(self):
         for failure in ["FAIL_TEST", "FAIL_RELEASE_TEST"]:
@@ -203,10 +274,12 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(len(writes), 1)
         self.assertEqual(writes[0][:3], ["git", "tag", "-s"])
         self.assertFalse(Path(writes[0][5]).exists())
+        self.assertEqual(self.index_calls(), [])
 
     def test_push_failure_is_reported(self):
         self.run_make(success=False, PUBLISH="1", FAIL_PUSH="1")
         self.assertEqual(len(self.writes()), 2)
+        self.assertEqual(self.index_calls(), [])
 
 
 if __name__ == "__main__":
