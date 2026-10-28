@@ -35,6 +35,21 @@ project-local directories and runs `go mod verify` before building or testing.
 The first build can require downloading the pinned Go toolchain; subsequent
 builds use the cache and vendored modules.
 
+## Library boundaries
+
+Public `store` owns passage store operations and mutation coordination; public
+`agecrypto` owns encryption, identity loading, and plugin interaction. Shared
+rooted writes and platform permission enforcement live in `internal/storefs`.
+CLI configuration, rendering, Git, clipboard, and editors stay internal. The CLI
+uses the same public library API as external consumers. Keep one implementation
+and one root module; public API changes ship with the existing release tags.
+
+The library accepts explicit configuration and caller-controlled interaction.
+Avoid adding environment defaults, terminal output, Git actions, or new subprocesses
+to store workflows. Keep lazy identity loading so listing and completion work
+without keys. Crypto engines cache identities for their lifetime and serialize
+operations; stores serialize operations and automatically lock mutations.
+
 ## Testing and verification
 
 Run the standard test suite and dependency vulnerability scan with:
@@ -46,7 +61,13 @@ make vuln
 
 `make test` uses isolated secret fixtures, an executable test age plugin, mocked
 clipboard lifecycle tests, and in-memory Git repositories/transports. It does not
-write repository Git metadata. `make test-integration` explicitly enables disposable
+write repository Git metadata. The default suite also builds a disposable external
+Go module against the public API and checks its import dependencies. It uses
+repository-local caches, verifies modules before vendoring, and disables networking;
+it does not use dependency packages' test suites. Existing library examples execute
+as part of the default tests. For concurrent library operations, run
+`make test CGO_ENABLED=1 TEST_FLAGS='-race'` with a C compiler installed.
+`make test-integration` explicitly enables disposable
 filesystem Git tests and is intended for CI or a user-controlled environment.
 `make test-reference` compares both encryption directions with the original shell
 script in disposable stores; set `PASSGAGE_REFERENCE_SCRIPT` to that script and

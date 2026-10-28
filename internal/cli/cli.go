@@ -12,13 +12,15 @@ import (
 	"strconv"
 	"strings"
 
+	"filippo.io/age/plugin"
 	git "github.com/go-git/go-git/v5"
+	"github.com/jenic/passgage/agecrypto"
 	"github.com/jenic/passgage/internal/build"
 	"github.com/jenic/passgage/internal/cfg"
 	"github.com/jenic/passgage/internal/clip"
 	"github.com/jenic/passgage/internal/editor"
 	"github.com/jenic/passgage/internal/gitstore"
-	"github.com/jenic/passgage/internal/store"
+	"github.com/jenic/passgage/store"
 	"github.com/skip2/go-qrcode"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -67,7 +69,7 @@ func New(in io.Reader, out, errout io.Writer) *cobra.Command {
 				return fmt.Errorf("passphrases are empty or do not match")
 			}
 		}
-		if e = store.Initialize(conf, pass); e != nil {
+		if e = store.Initialize(store.InitOptions{Dir: conf.Dir, IdentityFile: conf.Identities, Passphrase: pass}); e != nil {
 			return e
 		}
 		fmt.Fprintln(c.ErrOrStderr(), "Created identity and store at", conf.Dir)
@@ -174,35 +176,67 @@ func (a *app) confirm(prompt string, force bool) error {
 	}
 	return nil
 }
-func (a *app) open(create bool) (*store.Store, error) {
-	c, e := a.config()
-	if e != nil {
-		return nil, e
-	}
-	return store.Open(c, create, a.secret)
+func (a *app) engine(c cfg.Config) (*agecrypto.Engine, error) {
+	return agecrypto.New(agecrypto.Config{IdentityFile: c.Identities, AllowedPlugins: c.Plugins, Prompt: a.secret, PluginUI: &plugin.ClientUI{
+		DisplayMessage: func(name, msg string) error {
+			_, err := fmt.Fprintf(a.root.ErrOrStderr(), "%s: %s\n", name, msg)
+			return err
+		},
+		RequestValue: func(name, prompt string, secret bool) (string, error) { return a.secret(name + ": " + prompt) },
+		Confirm: func(name, prompt, yes, no string) (bool, error) {
+			v, err := a.secret(name + ": " + prompt + " [" + yes + "/" + no + "]")
+			return v == yes, err
+		},
+		WaitTimer: func(name string) {
+			fmt.Fprintf(a.root.ErrOrStderr(), "Waiting for %s; check your hardware token.\n", name)
+		},
+	}})
 }
-func (a *app) mutate(fn func(*store.Store) ([]string, string, error)) error {
-	s, e := a.open(true)
-	if e != nil {
-		return e
+func (a *app) openConfig(c cfg.Config, create bool) (*store.Store, error) {
+	engine, err := a.engine(c)
+	if err != nil {
+		return nil, err
 	}
-	defer s.Close()
-	unlock, e := s.Lock()
-	if e != nil {
-		return e
+	return store.Open(store.Config{Dir: c.Dir, Create: create, Crypto: engine, RecipientsFile: c.RecipientsFile, Recipients: c.Recipients})
+}
+func (a *app) open(create bool) (*store.Store, error) {
+	c, err := a.config()
+	if err != nil {
+		return nil, err
 	}
-	defer unlock()
-	paths, message, e := fn(s)
-	if e != nil {
-		if len(paths) > 0 {
-			return fmt.Errorf("some files were changed (%s), without an automatic commit: %w", strings.Join(paths, ", "), e)
-		}
-		return e
-	}
-	if e = gitstore.AutoCommit(s.Config.Dir, paths, message, a.root.ErrOrStderr()); e != nil {
-		return fmt.Errorf("files saved, but automatic Git commit failed: %w", e)
+	return a.openConfig(c, create)
+}
+func nativeCrypto() error {
+	if os.Getenv("PASSAGE_AGE") != "" {
+		return fmt.Errorf("PASSAGE_AGE is unsupported: passgage uses native age; unset it")
 	}
 	return nil
+}
+func (a *app) mutate(fn func(*store.Tx, cfg.Config) (string, error)) error {
+	conf, err := a.config()
+	if err != nil {
+		return err
+	}
+	s, err := a.openConfig(conf, true)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	_, err = s.Update(func(tx *store.Tx) error {
+		message, err := fn(tx, conf)
+		paths := tx.Changes().Paths
+		if err != nil {
+			if len(paths) > 0 {
+				return fmt.Errorf("some files were changed (%s), without an automatic commit: %w", strings.Join(paths, ", "), err)
+			}
+			return err
+		}
+		if err = gitstore.AutoCommit(conf.Dir, paths, message, a.root.ErrOrStderr()); err != nil {
+			return fmt.Errorf("files saved, but automatic Git commit failed: %w", err)
+		}
+		return nil
+	})
+	return err
 }
 func (a *app) show(c *cobra.Command) {
 	var clipLine, qrLine string
@@ -214,7 +248,11 @@ func (a *app) show(c *cobra.Command) {
 		if clipLine != "" && qrLine != "" {
 			return fmt.Errorf("--clip and --qrcode are mutually exclusive")
 		}
-		s, e := a.open(false)
+		conf, e := a.config()
+		if e != nil {
+			return e
+		}
+		s, e := a.openConfig(conf, false)
 		if e != nil {
 			return e
 		}
@@ -223,7 +261,20 @@ func (a *app) show(c *cobra.Command) {
 		if len(args) > 0 {
 			name = args[0]
 		}
-		if name == "" || (!s.Exists(name) && s.IsDir(name)) {
+		exists, isDir := false, name == ""
+		if name != "" {
+			exists, e = s.Exists(name)
+			if e != nil {
+				return e
+			}
+			if !exists {
+				isDir, e = s.IsDir(name)
+				if e != nil {
+					return e
+				}
+			}
+		}
+		if isDir && !exists {
 			if clipLine != "" || qrLine != "" {
 				return fmt.Errorf("select an entry to copy or encode")
 			}
@@ -232,6 +283,9 @@ func (a *app) show(c *cobra.Command) {
 				return e
 			}
 			return writeListing(cmd.OutOrStdout(), name, names)
+		}
+		if err := nativeCrypto(); err != nil {
+			return err
 		}
 		b, e := s.Read(name)
 		if e != nil {
@@ -254,15 +308,15 @@ func (a *app) show(c *cobra.Command) {
 		if n > len(lines) || len(lines[n-1]) == 0 {
 			return fmt.Errorf("no password at line %d", n)
 		}
-		return a.outputSecret(s, lines[n-1], name, clipLine != "", qrLine != "", false)
+		return a.outputSecret(conf, lines[n-1], name, clipLine != "", qrLine != "", false)
 	}
 }
-func (a *app) outputSecret(s *store.Store, b []byte, name string, copy, qr, print bool) error {
+func (a *app) outputSecret(conf cfg.Config, b []byte, name string, copy, qr, print bool) error {
 	if copy {
-		if e := clip.Copy(b, s.Config.ClipTime, s.Config.Selection); e != nil {
+		if e := clip.Copy(b, conf.ClipTime, conf.Selection); e != nil {
 			return e
 		}
-		fmt.Fprintf(a.root.ErrOrStderr(), "Copied %s to clipboard. Will clear in %s.\n", name, s.Config.ClipTime)
+		fmt.Fprintf(a.root.ErrOrStderr(), "Copied %s to clipboard. Will clear in %s.\n", name, conf.ClipTime)
 		return nil
 	}
 	if qr {
@@ -281,17 +335,24 @@ func (a *app) outputSecret(s *store.Store, b []byte, name string, copy, qr, prin
 func (a *app) insert() {
 	var multi, echo, force bool
 	c := &cobra.Command{Use: "insert <entry>", Aliases: []string{"add"}, Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, args []string) error {
-		return a.mutate(func(s *store.Store) ([]string, string, error) {
+		if err := nativeCrypto(); err != nil {
+			return err
+		}
+		return a.mutate(func(s *store.Tx, conf cfg.Config) (string, error) {
 			name, err := store.Name(args[0])
 			if err != nil {
-				return nil, "", err
+				return "", err
 			}
 			if multi && echo {
-				return nil, "", fmt.Errorf("--multiline and --echo are mutually exclusive")
+				return "", fmt.Errorf("--multiline and --echo are mutually exclusive")
 			}
-			if s.Exists(name) {
+			exists, err := s.Exists(name)
+			if err != nil {
+				return "", err
+			}
+			if exists {
 				if e := a.confirm("Overwrite "+name+"?", force); e != nil {
-					return nil, "", e
+					return "", e
 				}
 			}
 			var b []byte
@@ -317,14 +378,14 @@ func (a *app) insert() {
 				b = []byte(p + "\n")
 			}
 			if e != nil {
-				return nil, "", e
+				return "", e
 			}
 			defer clear(b)
-			e = s.Write(name, b)
+			_, e = s.Write(name, b, store.WriteOptions{Overwrite: true})
 			if e != nil {
-				return nil, "", e
+				return "", e
 			}
-			return []string{name + ".age"}, "Add given password for " + name + " to store.", e
+			return "Add given password for " + name + " to store.", e
 		})
 	}}
 	c.Flags().BoolVarP(&multi, "multiline", "m", false, "Read complete contents from stdin")
@@ -335,28 +396,35 @@ func (a *app) insert() {
 func (a *app) generate() {
 	var noSymbols, copy, qr, inplace, force bool
 	c := &cobra.Command{Use: "generate <entry> [length]", Args: cobra.RangeArgs(1, 2), RunE: func(c *cobra.Command, args []string) error {
+		if err := nativeCrypto(); err != nil {
+			return err
+		}
 		if (copy && qr) || (inplace && force) {
 			return fmt.Errorf("incompatible generation flags")
 		}
 		var generated []byte
 		var conf cfg.Config
-		e := a.mutate(func(s *store.Store) ([]string, string, error) {
-			conf = s.Config
+		e := a.mutate(func(s *store.Tx, loaded cfg.Config) (string, error) {
+			conf = loaded
 			name, nameErr := store.Name(args[0])
 			if nameErr != nil {
-				return nil, "", nameErr
+				return "", nameErr
 			}
 			length := conf.Length
 			if len(args) == 2 {
 				n, e := strconv.Atoi(args[1])
 				if e != nil {
-					return nil, "", e
+					return "", e
 				}
 				length = n
 			}
-			if !inplace && s.Exists(name) {
+			exists, existsErr := s.Exists(name)
+			if existsErr != nil {
+				return "", existsErr
+			}
+			if !inplace && exists {
 				if e := a.confirm("Overwrite "+name+"?", force); e != nil {
-					return nil, "", e
+					return "", e
 				}
 			}
 			pattern := conf.Characters
@@ -366,14 +434,14 @@ func (a *app) generate() {
 			var err error
 			generated, err = store.Generate(length, pattern)
 			if err != nil {
-				return nil, "", err
+				return "", err
 			}
 			b := append(append([]byte{}, generated...), '\n')
 			verb := "Add"
 			if inplace {
 				old, e := s.Read(name)
 				if e != nil {
-					return nil, "", e
+					return "", e
 				}
 				if i := bytes.IndexByte(old, '\n'); i >= 0 {
 					b = append(b, old[i+1:]...)
@@ -382,17 +450,17 @@ func (a *app) generate() {
 				verb = "Replace"
 			}
 			defer clear(b)
-			err = s.Write(name, b)
+			_, err = s.Write(name, b, store.WriteOptions{Overwrite: true})
 			if err != nil {
-				return nil, "", err
+				return "", err
 			}
-			return []string{name + ".age"}, verb + " generated password for " + name + ".", err
+			return verb + " generated password for " + name + ".", err
 		})
 		defer clear(generated)
 		if e != nil {
 			return e
 		}
-		return a.outputSecret(&store.Store{Config: conf}, generated, args[0], copy, qr, true)
+		return a.outputSecret(conf, generated, args[0], copy, qr, true)
 	}}
 	c.Flags().BoolVarP(&noSymbols, "no-symbols", "n", false, "Use the alphanumeric character set")
 	c.Flags().BoolVarP(&copy, "clip", "c", false, "Copy the generated password")
@@ -405,18 +473,25 @@ func (a *app) edit() {
 	var external string
 	var editorArgs []string
 	c := &cobra.Command{Use: "edit <entry>", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, args []string) error {
-		return a.mutate(func(s *store.Store) ([]string, string, error) {
+		if err := nativeCrypto(); err != nil {
+			return err
+		}
+		return a.mutate(func(s *store.Tx, conf cfg.Config) (string, error) {
 			name, err := store.Name(args[0])
 			if err != nil {
-				return nil, "", err
+				return "", err
 			}
 			var old []byte
 			var e error
 			verb := "Add"
-			if s.Exists(name) {
+			exists, err := s.Exists(name)
+			if err != nil {
+				return "", err
+			}
+			if exists {
 				old, e = s.Read(name)
 				if e != nil {
-					return nil, "", e
+					return "", e
 				}
 				verb = "Edit"
 			}
@@ -428,17 +503,17 @@ func (a *app) edit() {
 				b, e = editor.Edit(old)
 			}
 			if e != nil {
-				return nil, "", e
+				return "", e
 			}
 			defer clear(b)
 			if bytes.Equal(old, b) {
-				return nil, "", nil
+				return "", nil
 			}
-			e = s.Write(name, b)
+			_, e = s.Write(name, b, store.WriteOptions{Overwrite: true})
 			if e != nil {
-				return nil, "", e
+				return "", e
 			}
-			return []string{name + ".age"}, verb + " password for " + name + " using passgage.", e
+			return verb + " password for " + name + " using passgage.", e
 		})
 	}}
 	c.Flags().StringVar(&external, "external", "", "Explicit external editor executable")
@@ -448,12 +523,12 @@ func (a *app) edit() {
 func (a *app) remove() {
 	var recursive, force bool
 	c := &cobra.Command{Use: "rm <entry|directory>", Aliases: []string{"remove", "delete"}, Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, args []string) error {
-		return a.mutate(func(s *store.Store) ([]string, string, error) {
+		return a.mutate(func(s *store.Tx, conf cfg.Config) (string, error) {
 			if e := a.confirm("Delete "+args[0]+"?", force); e != nil {
-				return nil, "", e
+				return "", e
 			}
-			p, e := s.Remove(args[0], recursive)
-			return p, "Remove " + args[0] + " from store.", e
+			_, e := s.Remove(args[0], store.RemoveOptions{Recursive: recursive})
+			return "Remove " + args[0] + " from store.", e
 		})
 	}}
 	c.Flags().BoolVarP(&recursive, "recursive", "r", false, "Remove a directory's entries")
@@ -471,9 +546,17 @@ func (a *app) copyMove(move bool) {
 		verb = "Rename"
 	}
 	c := &cobra.Command{Use: name + " <source> <destination>", Aliases: aliases, Args: cobra.ExactArgs(2), RunE: func(c *cobra.Command, args []string) error {
-		return a.mutate(func(s *store.Store) ([]string, string, error) {
-			p, e := s.Copy(args[0], args[1], move, force)
-			return p, verb + " " + args[0] + " to " + args[1] + ".", e
+		if err := nativeCrypto(); err != nil {
+			return err
+		}
+		return a.mutate(func(s *store.Tx, conf cfg.Config) (string, error) {
+			var e error
+			if move {
+				_, e = s.Move(args[0], args[1], store.CopyOptions{Overwrite: force})
+			} else {
+				_, e = s.Copy(args[0], args[1], store.CopyOptions{Overwrite: force})
+			}
+			return verb + " " + args[0] + " to " + args[1] + ".", e
 		})
 	}}
 	c.Flags().BoolVarP(&force, "force", "f", false, "Overwrite destinations")
@@ -482,26 +565,15 @@ func (a *app) copyMove(move bool) {
 func (a *app) reencrypt() {
 	var prefix string
 	c := &cobra.Command{Use: "reencrypt", Args: cobra.NoArgs, RunE: func(c *cobra.Command, _ []string) error {
-		return a.mutate(func(s *store.Store) ([]string, string, error) {
-			names, e := s.List(prefix)
-			if e != nil {
-				return nil, "", e
+		if err := nativeCrypto(); err != nil {
+			return err
+		}
+		return a.mutate(func(s *store.Tx, conf cfg.Config) (string, error) {
+			changes, err := s.Reencrypt(prefix)
+			for _, p := range changes.Paths {
+				fmt.Fprintln(c.ErrOrStderr(), strings.TrimSuffix(p, ".age")+": reencrypted")
 			}
-			var changed []string
-			for _, n := range names {
-				b, e := s.Read(n)
-				if e != nil {
-					return changed, "", e
-				}
-				e = s.Write(n, b)
-				clear(b)
-				if e != nil {
-					return changed, "", e
-				}
-				changed = append(changed, n+".age")
-				fmt.Fprintln(c.ErrOrStderr(), n+": reencrypted")
-			}
-			return changed, "Reencrypted " + prefix + ".", nil
+			return "Reencrypted " + prefix + ".", err
 		})
 	}}
 	c.Flags().StringVarP(&prefix, "path", "p", "", "Restrict to a directory")
@@ -533,6 +605,9 @@ func (a *app) search() {
 func (a *app) grep() {
 	var insensitive, numbers, files, invert, fixed, extended bool
 	c := &cobra.Command{Use: "grep [flags] <pattern>", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, args []string) error {
+		if err := nativeCrypto(); err != nil {
+			return err
+		}
 		pattern := args[0]
 		if fixed {
 			pattern = regexp.QuoteMeta(pattern)
@@ -629,19 +704,17 @@ func (a *app) git() {
 				return e
 			}
 			defer s.Close()
-			unlock, e := s.Lock()
-			if e != nil {
-				return e
-			}
-			defer unlock()
-			if e = s.SetupGitIgnore(); e != nil {
-				return e
-			}
-			p, e := s.GitFiles()
-			if e != nil {
-				return e
-			}
-			return gitstore.AutoCommit(conf.Dir, p, "Add current contents of password store.", c.ErrOrStderr())
+			_, e = s.Update(func(_ *store.Tx) error {
+				if e := gitstore.SetupGitIgnore(conf.Dir); e != nil {
+					return e
+				}
+				p, e := gitstore.GitFiles(conf.Dir)
+				if e != nil {
+					return e
+				}
+				return gitstore.AutoCommit(conf.Dir, p, "Add current contents of password store.", c.ErrOrStderr())
+			})
+			return e
 		}
 		r, e := gitstore.Open(conf.Dir)
 		if e != nil {
@@ -652,15 +725,23 @@ func (a *app) git() {
 			return e
 		}
 		defer s.Close()
-		unlock, e := s.Lock()
-		if e != nil {
-			return e
-		}
-		defer unlock()
-		if args[0] == "pull" || args[0] == "push" || args[0] == "fetch" {
-			return gitstore.Network(r, args, a.secret)
-		}
-		return gitstore.Local(r, conf.Dir, args, c.OutOrStdout(), s.Crypto.Decrypt)
+		_, e = s.Update(func(_ *store.Tx) error {
+			if args[0] == "pull" || args[0] == "push" || args[0] == "fetch" {
+				return gitstore.Network(r, args, a.secret)
+			}
+			engine, e := a.engine(conf)
+			if e != nil {
+				return e
+			}
+			decrypt := func(b []byte) ([]byte, error) {
+				if e := nativeCrypto(); e != nil {
+					return nil, e
+				}
+				return engine.Decrypt(b)
+			}
+			return gitstore.Local(r, conf.Dir, args, c.OutOrStdout(), decrypt)
+		})
+		return e
 	}}
 	a.root.AddCommand(c)
 }

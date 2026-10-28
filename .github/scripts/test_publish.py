@@ -67,7 +67,7 @@ elif tool == "go":
         (root / "tested").touch()
         fail("FAIL_TEST")
 elif tool == "gofmt":
-    assert args == ["-w", "cmd", "internal", "tests"]
+    assert args == ["-w", "cmd", "internal", "store", "agecrypto", "tests"]
 else: raise AssertionError(tool)
 '''
 

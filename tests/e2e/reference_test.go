@@ -9,8 +9,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/jenic/passgage/agecrypto"
 	"github.com/jenic/passgage/internal/cfg"
-	"github.com/jenic/passgage/internal/store"
+	"github.com/jenic/passgage/store"
 )
 
 func TestOriginalPassageInteroperability(t *testing.T) {
@@ -21,16 +22,20 @@ func TestOriginalPassageInteroperability(t *testing.T) {
 	}
 	dir := t.TempDir()
 	c := cfg.Config{Dir: filepath.Join(dir, "store"), Identities: filepath.Join(dir, "identities")}
-	if e := store.Initialize(c, ""); e != nil {
+	if e := store.Initialize(store.InitOptions{Dir: c.Dir, IdentityFile: c.Identities}); e != nil {
 		t.Fatal(e)
 	}
-	s, e := store.Open(c, false, nil)
+	engine, e := agecrypto.New(agecrypto.Config{IdentityFile: c.Identities})
+	if e != nil {
+		t.Fatal(e)
+	}
+	s, e := store.Open(store.Config{Dir: c.Dir, Crypto: engine})
 	if e != nil {
 		t.Fatal(e)
 	}
 	defer s.Close()
 	want := []byte("password fixture\nUnicode: λ\n\n")
-	if e = s.Write("native/entry", want); e != nil {
+	if _, e = s.Write("native/entry", want, store.WriteOptions{}); e != nil {
 		t.Fatal(e)
 	}
 	shell := func(input []byte, args ...string) []byte {

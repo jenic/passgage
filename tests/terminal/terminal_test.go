@@ -19,8 +19,9 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/jenic/passgage/agecrypto"
 	"github.com/jenic/passgage/internal/cfg"
-	"github.com/jenic/passgage/internal/store"
+	"github.com/jenic/passgage/store"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
@@ -103,15 +104,19 @@ func fixture(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Initialize(c, ""); err != nil {
+	if err := store.Initialize(store.InitOptions{Dir: c.Dir, IdentityFile: c.Identities}); err != nil {
 		t.Fatal(err)
 	}
-	s, err := store.Open(c, false, nil)
+	engine, err := agecrypto.New(agecrypto.Config{IdentityFile: c.Identities})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(store.Config{Dir: c.Dir, Crypto: engine})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	if err := s.Write("folder/entry", []byte("synthetic\nmetadata\n\n")); err != nil {
+	if _, err := s.Write("folder/entry", []byte("synthetic\nmetadata\n\n"), store.WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	return s
@@ -358,7 +363,7 @@ func TestEditorTerminalLifecycle(t *testing.T) {
 		{"ctrl-c", "\x03", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			before, err := os.ReadFile(filepath.Join(s.Config.Dir, "folder", "entry.age"))
+			before, err := os.ReadFile(filepath.Join(os.Getenv("PASSAGE_DIR"), "folder", "entry.age"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -372,7 +377,7 @@ func TestEditorTerminalLifecycle(t *testing.T) {
 					t.Fatalf("save: %q %v %+v", b, err, r)
 				}
 			} else {
-				after, err := os.ReadFile(filepath.Join(s.Config.Dir, "folder", "entry.age"))
+				after, err := os.ReadFile(filepath.Join(os.Getenv("PASSAGE_DIR"), "folder", "entry.age"))
 				if r.Code == 0 || err != nil || !bytes.Equal(before, after) {
 					t.Fatalf("cancel modified entry: %v %+v", err, r)
 				}
@@ -382,9 +387,9 @@ func TestEditorTerminalLifecycle(t *testing.T) {
 }
 
 func TestInvalidThemeDoesNotEnterTerminal(t *testing.T) {
-	s := fixture(t)
+	fixture(t)
 	t.Setenv("PASSGAGE_EDITOR_THEME", "auto")
-	file := filepath.Join(s.Config.Dir, "folder", "entry.age")
+	file := filepath.Join(os.Getenv("PASSAGE_DIR"), "folder", "entry.age")
 	before, err := os.ReadFile(file)
 	if err != nil {
 		t.Fatal(err)

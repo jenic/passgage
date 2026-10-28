@@ -1,4 +1,4 @@
-package store
+package storefs
 
 import (
 	"fmt"
@@ -9,7 +9,8 @@ import (
 
 var reOpenFile = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReOpenFile")
 
-func restrictFile(f *os.File) (err error) {
+// RestrictFile restricts an open file to the current user (and SYSTEM on Windows).
+func RestrictFile(f *os.File) (err error) {
 	defer func() {
 		if err != nil {
 			err = &os.PathError{Op: "restrict permissions", Path: f.Name(), Err: err}

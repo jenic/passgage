@@ -4,31 +4,8 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math/big"
-	"os"
-	"path/filepath"
 	"strings"
 )
-
-func writeExclusive(p string, b []byte) error {
-	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		return err
-	}
-	if err = restrictFile(f); err == nil {
-		_, err = f.Write(b)
-	}
-	if err == nil {
-		err = f.Sync()
-	}
-	closeErr := f.Close()
-	if err != nil {
-		return err
-	}
-	return closeErr
-}
 
 // Generate samples uniformly from a passage-style ASCII character set.
 func Generate(length int, pattern string) ([]byte, error) {

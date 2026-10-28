@@ -1,4 +1,5 @@
-package store
+// Package agecrypto provides native age encryption and passage identity loading.
+package agecrypto
 
 import (
 	"bufio"
@@ -9,49 +10,135 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 
 	"filippo.io/age"
 	"filippo.io/age/agessh"
 	"filippo.io/age/armor"
 	"filippo.io/age/plugin"
-	"github.com/jenic/passgage/internal/cfg"
 	"golang.org/x/crypto/ssh"
 )
 
-// Crypto implements native age encryption with per-command identity caching.
-type Crypto struct {
-	Config     cfg.Config
-	Prompt     func(string) (string, error)
+// ErrPluginNotAllowed reports a plugin absent from the explicit allowlist.
+var ErrPluginNotAllowed = errors.New("age plugin is not allowed")
+
+// ErrInteractionRequired reports an operation requiring a caller-provided callback.
+var ErrInteractionRequired = errors.New("interactive input required")
+
+// Config explicitly configures an engine. No passage environment settings are read.
+type Config struct {
+	// IdentityFile names a passage identity file, loaded only when needed.
+	IdentityFile string
+	// Identities supplies caller-owned age identities instead of an identity file.
+	// The slice is copied; its identities must not be mutated during engine use.
+	Identities []age.Identity
+	// AllowedPlugins lists plugin names permitted to run as child processes.
+	AllowedPlugins []string
+	// Prompt supplies passphrases for encrypted identity files and SSH keys.
+	Prompt func(string) (string, error)
+	// PluginUI handles plugin interaction. Missing input callbacks fail closed.
+	// WaitTimer may be called concurrently by the age plugin implementation.
+	PluginUI *plugin.ClientUI
+}
+
+// Engine encrypts and decrypts age messages. Operations are serialized and successful
+// identity unlocks are cached for its lifetime. Callbacks must not re-enter the engine.
+// An Engine must be constructed with New and must not be copied.
+type Engine struct {
+	mu         sync.Mutex
+	config     Config
+	uiMu       sync.Mutex
+	uiError    error
 	identities []age.Identity
 }
 
-func (c *Crypto) ask(s string) (string, error) {
-	if c.Prompt == nil {
-		return "", fmt.Errorf("interactive input required: %s", s)
+// New snapshots configuration without reading identities or starting plugins.
+// IdentityFile and Identities are mutually exclusive. Neither is required for
+// recipient-only encryption. Relative identity paths are resolved now.
+func New(c Config) (*Engine, error) {
+	if c.IdentityFile != "" && len(c.Identities) != 0 {
+		return nil, errors.New("IdentityFile and Identities are mutually exclusive")
 	}
-	return c.Prompt(s)
-}
-func (c *Crypto) ui() *plugin.ClientUI {
-	return &plugin.ClientUI{
-		DisplayMessage: func(name, msg string) error { fmt.Fprintf(os.Stderr, "%s: %s\n", name, msg); return nil },
-		RequestValue:   func(name, prompt string, secret bool) (string, error) { return c.ask(name + ": " + prompt) },
-		Confirm: func(name, prompt, yes, no string) (bool, error) {
-			v, err := c.ask(name + ": " + prompt + " [" + yes + "/" + no + "]")
-			return v == yes, err
-		},
-		WaitTimer: func(name string) { fmt.Fprintf(os.Stderr, "Waiting for %s; check your hardware token.\n", name) },
+	if c.IdentityFile != "" {
+		var err error
+		c.IdentityFile, err = filepath.Abs(c.IdentityFile)
+		if err != nil {
+			return nil, err
+		}
 	}
+	c.Identities = append([]age.Identity(nil), c.Identities...)
+	c.AllowedPlugins = append([]string(nil), c.AllowedPlugins...)
+	for _, id := range c.Identities {
+		if id == nil {
+			return nil, errors.New("nil age identity")
+		}
+	}
+	if c.PluginUI != nil {
+		ui := *c.PluginUI
+		c.PluginUI = &ui
+	}
+	return &Engine{config: c}, nil
 }
-func (c *Crypto) allow(name string) error {
-	for _, n := range c.Config.Plugins {
+
+func (c *Engine) ask(s string) (string, error) {
+	if c.config.Prompt == nil {
+		return "", fmt.Errorf("%w: %s", ErrInteractionRequired, s)
+	}
+	return c.config.Prompt(s)
+}
+func (c *Engine) ui() *plugin.ClientUI {
+	ui := plugin.ClientUI{}
+	if c.config.PluginUI != nil {
+		ui = *c.config.PluginUI
+	}
+	// Plugin protocol callbacks communicate failures to the plugin. Keep the
+	// original callback error too, so callers can inspect it after the protocol ends.
+	request := ui.RequestValue
+	ui.RequestValue = func(name, prompt string, secret bool) (string, error) {
+		var value string
+		var err error
+		if request == nil {
+			err = fmt.Errorf("%w: plugin %s", ErrInteractionRequired, name)
+		} else {
+			value, err = request(name, prompt, secret)
+		}
+		c.recordUIError(err)
+		return value, err
+	}
+	confirm := ui.Confirm
+	ui.Confirm = func(name, prompt, yes, no string) (bool, error) {
+		var value bool
+		var err error
+		if confirm == nil {
+			err = fmt.Errorf("%w: plugin %s", ErrInteractionRequired, name)
+		} else {
+			value, err = confirm(name, prompt, yes, no)
+		}
+		c.recordUIError(err)
+		return value, err
+	}
+	display := ui.DisplayMessage
+	ui.DisplayMessage = func(name, msg string) error {
+		if display == nil {
+			return nil
+		}
+		err := display(name, msg)
+		c.recordUIError(err)
+		return err
+	}
+	return &ui
+}
+func (c *Engine) allow(name string) error {
+	for _, n := range c.config.AllowedPlugins {
 		if n == name {
 			return nil
 		}
 	}
-	return fmt.Errorf("age plugin %q requires --allow-age-plugin=%s or PASSGAGE_AGE_PLUGINS", name, name)
+	return fmt.Errorf("%w: %s", ErrPluginNotAllowed, name)
 }
-func (c *Crypto) load() (ids []age.Identity, result error) {
+func (c *Engine) load() (ids []age.Identity, result error) {
 	defer func() {
 		if result != nil {
 			c.identities = nil
@@ -60,10 +147,21 @@ func (c *Crypto) load() (ids []age.Identity, result error) {
 	if c.identities != nil {
 		return c.identities, nil
 	}
-	if os.Getenv("PASSAGE_AGE") != "" {
-		return nil, fmt.Errorf("PASSAGE_AGE is unsupported: passgage uses native age; unset it")
+	if len(c.config.Identities) != 0 {
+		for _, id := range c.config.Identities {
+			if p, ok := id.(*plugin.Identity); ok {
+				if err := c.allow(p.Name()); err != nil {
+					return nil, err
+				}
+			}
+		}
+		c.identities = append([]age.Identity(nil), c.config.Identities...)
+		return c.identities, nil
 	}
-	b, err := os.ReadFile(c.Config.Identities)
+	if c.config.IdentityFile == "" {
+		return nil, errors.New("no identities configured")
+	}
+	b, err := os.ReadFile(c.config.IdentityFile)
 	if err != nil {
 		return nil, fmt.Errorf("read identities: %w", err)
 	}
@@ -158,7 +256,18 @@ func ageReader(b []byte) io.Reader {
 }
 
 // Decrypt authenticates the entire age message before returning plaintext.
-func (c *Crypto) Decrypt(b []byte) ([]byte, error) {
+func (c *Engine) Decrypt(b []byte) (result []byte, resultErr error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.resetUIError()
+	defer func() {
+		if err := c.takeUIError(); err != nil {
+			clear(result)
+			result = nil
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
+
 	ids, err := c.load()
 	if err != nil {
 		return nil, err
@@ -176,10 +285,18 @@ func (c *Crypto) Decrypt(b []byte) ([]byte, error) {
 }
 
 // Encrypt encrypts plaintext to recipient lines or, when absent, local identities.
-func (c *Crypto) Encrypt(plain []byte, lines string) ([]byte, error) {
-	if os.Getenv("PASSAGE_AGE") != "" {
-		return nil, fmt.Errorf("PASSAGE_AGE is unsupported; unset it")
-	}
+func (c *Engine) Encrypt(plain []byte, lines string) (result []byte, resultErr error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.resetUIError()
+	defer func() {
+		if err := c.takeUIError(); err != nil {
+			clear(result)
+			result = nil
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
+
 	var recipients []age.Recipient
 	if lines == "" {
 		ids, err := c.load()
@@ -258,52 +375,13 @@ func (c *Crypto) Encrypt(plain []byte, lines string) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// Initialize creates an identity and root recipients file without overwriting keys.
-func Initialize(c cfg.Config, passphrase string) error {
-	if _, err := os.Stat(c.Identities); err == nil {
-		return fmt.Errorf("identity already exists; initialization never replaces keys")
-	} else if !os.IsNotExist(err) {
-		return err
+func (c *Engine) recordUIError(err error) {
+	if err == nil {
+		return
 	}
-	if err := os.MkdirAll(c.Dir, 0700); err != nil {
-		return err
-	}
-	if _, err := os.Stat(c.Dir + "/.age-recipients"); err == nil {
-		return fmt.Errorf("recipients already exist")
-	}
-	id, err := age.GenerateX25519Identity()
-	if err != nil {
-		return err
-	}
-	b := []byte(id.String() + "\n")
-	defer clear(b)
-	if passphrase != "" {
-		r, err := age.NewScryptRecipient(passphrase)
-		if err != nil {
-			return err
-		}
-		var out bytes.Buffer
-		a := armor.NewWriter(&out)
-		w, err := age.Encrypt(a, r)
-		if err != nil {
-			return err
-		}
-		if _, err = w.Write(b); err != nil {
-			return err
-		}
-		if err = w.Close(); err != nil {
-			return err
-		}
-		if err = a.Close(); err != nil {
-			return err
-		}
-		b = out.Bytes()
-	}
-	if err = writeExclusive(c.Identities, b); err != nil {
-		return fmt.Errorf("create identity: %w", err)
-	}
-	if err = writeExclusive(c.Dir+"/.age-recipients", []byte(id.Recipient().String()+"\n")); err != nil {
-		return fmt.Errorf("identity saved, recipients creation failed: %w", err)
-	}
-	return nil
+	c.uiMu.Lock()
+	defer c.uiMu.Unlock()
+	c.uiError = errors.Join(c.uiError, err)
 }
+func (c *Engine) resetUIError()      { c.uiMu.Lock(); c.uiError = nil; c.uiMu.Unlock() }
+func (c *Engine) takeUIError() error { c.uiMu.Lock(); defer c.uiMu.Unlock(); return c.uiError }

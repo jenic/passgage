@@ -11,8 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jenic/passgage/agecrypto"
 	"github.com/jenic/passgage/internal/cfg"
-	"github.com/jenic/passgage/internal/store"
+	"github.com/jenic/passgage/store"
 	clipboard "golang.design/x/clipboard"
 )
 
@@ -27,15 +28,19 @@ func TestClipboardProcessLifecycle(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PASSGAGE_CACHE_DIR", filepath.Join(dir, "cache"))
 	c := cfg.Config{Dir: filepath.Join(dir, "store"), Identities: filepath.Join(dir, "identities")}
-	if e := store.Initialize(c, ""); e != nil {
+	if e := store.Initialize(store.InitOptions{Dir: c.Dir, IdentityFile: c.Identities}); e != nil {
 		t.Fatal(e)
 	}
-	s, e := store.Open(c, false, nil)
+	engine, e := agecrypto.New(agecrypto.Config{IdentityFile: c.Identities})
+	if e != nil {
+		t.Fatal(e)
+	}
+	s, e := store.Open(store.Config{Dir: c.Dir, Crypto: engine})
 	if e != nil {
 		t.Fatal(e)
 	}
 	defer s.Close()
-	if e = s.Write("fixture", []byte("passgage clipboard test\n")); e != nil {
+	if _, e = s.Write("fixture", []byte("passgage clipboard test\n"), store.WriteOptions{}); e != nil {
 		t.Fatal(e)
 	}
 	copy := func() {

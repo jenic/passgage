@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jenic/passgage/internal/storefs"
 	"golang.org/x/sys/windows"
 )
 
@@ -56,12 +57,12 @@ func TestRestrictWritableFile(t *testing.T) {
 	defer f.Close()
 	// This is the ordinary write-only handle that previously failed with
 	// ERROR_ACCESS_DENIED when passed directly to SetSecurityInfo.
-	if err := restrictFile(f); err != nil {
+	if err := storefs.RestrictFile(f); err != nil {
 		t.Fatal(err)
 	}
 	assertPrivateDACL(t, name)
 	// Applying the same protected ACL again must also succeed.
-	if err := restrictFile(f); err != nil {
+	if err := storefs.RestrictFile(f); err != nil {
 		t.Fatal("reapplying private DACL:", err)
 	}
 	assertPrivateDACL(t, name)
@@ -95,7 +96,7 @@ func TestRestrictFileUsesHandleNotName(t *testing.T) {
 	}
 	alias := os.NewFile(uintptr(duplicate), decoy)
 	defer alias.Close()
-	if err := restrictFile(alias); err != nil {
+	if err := storefs.RestrictFile(alias); err != nil {
 		t.Fatal(err)
 	}
 	assertPrivateDACL(t, actual)
@@ -106,13 +107,13 @@ func TestRestrictFileUsesHandleNotName(t *testing.T) {
 
 func TestPrivateACLsAfterInitializeAndReplace(t *testing.T) {
 	s := fixture(t)
-	assertPrivateDACL(t, s.Config.Identities)
-	assertPrivateDACL(t, filepath.Join(s.Config.Dir, ".age-recipients"))
+	assertPrivateDACL(t, filepath.Join(filepath.Dir(s.fs.config.Dir), "identities"))
+	assertPrivateDACL(t, filepath.Join(s.fs.config.Dir, ".age-recipients"))
 	for _, value := range []string{"first", "replacement"} {
-		if err := s.Write("nested/entry", []byte(value)); err != nil {
+		if _, err := s.Write("nested/entry", []byte(value), WriteOptions{Overwrite: true}); err != nil {
 			t.Fatal(err)
 		}
-		assertPrivateDACL(t, filepath.Join(s.Config.Dir, "nested", "entry.age"))
+		assertPrivateDACL(t, filepath.Join(s.fs.config.Dir, "nested", "entry.age"))
 		got, err := s.Read("nested/entry")
 		if err != nil || string(got) != value {
 			t.Fatalf("round trip: %q, %v", got, err)
@@ -139,7 +140,7 @@ func TestRestrictClosedFileError(t *testing.T) {
 	if controlErr == nil {
 		t.Fatal("raw control accepted a closed file")
 	}
-	err = restrictFile(f)
+	err = storefs.RestrictFile(f)
 	var pathErr *os.PathError
 	if !errors.Is(err, controlErr) || !errors.As(err, &pathErr) || pathErr.Path != f.Name() || pathErr.Op != "restrict permissions" {
 		t.Fatalf("missing wrapped error context: %v", err)

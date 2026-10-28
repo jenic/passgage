@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,7 +10,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/jenic/passgage/internal/store"
+	"github.com/jenic/passgage/store"
 	"github.com/spf13/cobra"
 )
 
@@ -129,7 +130,7 @@ func (a *app) pathCandidates(prefix string, directoriesOnly bool) ([]string, cob
 	directive := cobra.ShellCompDirectiveNoFileComp
 	s, err := a.open(false)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, directive
 		}
 		return nil, directive | cobra.ShellCompDirectiveError

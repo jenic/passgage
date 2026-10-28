@@ -5,8 +5,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
-
-	"github.com/jenic/passgage/internal/cfg"
 )
 
 func TestListDirectories(t *testing.T) {
@@ -19,7 +17,7 @@ func TestListDirectories(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "entry.age"), []byte("not ciphertext"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	s, err := Open(cfg.Config{Dir: root}, false, nil)
+	s, err := Open(Config{Dir: root})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +56,7 @@ func TestListDirectoriesExcludesSymlinks(t *testing.T) {
 	if err := os.Symlink(t.TempDir(), filepath.Join(root, "outside")); err != nil {
 		t.Skip(err)
 	}
-	s, err := Open(cfg.Config{Dir: root}, false, nil)
+	s, err := Open(Config{Dir: root})
 	if err != nil {
 		t.Fatal(err)
 	}

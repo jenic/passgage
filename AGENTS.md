@@ -1,7 +1,8 @@
 # Repository guidelines
 
 Passgage is a native Go implementation of passage. Keep command parsing in
-`internal/cli`, filesystem and encryption logic in `internal/store`, and platform
+`internal/cli`, reusable filesystem logic in public `store`, encryption in public
+`agecrypto`, shared private-file helpers in `internal/storefs`, and platform
 integrations in dedicated internal packages. The entry point is `cmd/passgage`.
 
 Use `make build`, `make test`, and `make release-all`. All Go commands must set

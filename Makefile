@@ -17,7 +17,7 @@ endif
 LDFLAGS := -s -w -buildid= -X github.com/jenic/passgage/internal/build.Version=$(VERSION)
 
 fmt:
-	gofmt -w cmd internal tests
+	gofmt -w cmd internal store agecrypto tests
 verify:
 	go mod verify
 vet: verify

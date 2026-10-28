@@ -9,7 +9,7 @@ import (
 
 	"github.com/jenic/passgage/internal/cfg"
 	"github.com/jenic/passgage/internal/cli"
-	"github.com/jenic/passgage/internal/store"
+	"github.com/jenic/passgage/store"
 )
 
 func setup(t *testing.T) {
@@ -24,7 +24,7 @@ func setup(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if e = store.Initialize(c, ""); e != nil {
+	if e = store.Initialize(store.InitOptions{Dir: c.Dir, IdentityFile: c.Identities}); e != nil {
 		t.Fatal(e)
 	}
 }

@@ -45,6 +45,85 @@ passgage generate service/account
 permissions. Initialization never replaces an existing identity or recipients
 file. Hardware-token provisioning remains the plugin's responsibility.
 
+## Use as a Go library
+
+The module also exposes `github.com/jenic/passgage/store` and
+`github.com/jenic/passgage/agecrypto`. They share the CLI's module version and
+pre-v1 release policy: minor releases may change public APIs until v1.
+Import the public packages from another Go project;
+there is no separate library module or store-format migration.
+
+For an existing passage store, configure paths explicitly:
+
+```go
+import (
+    "github.com/jenic/passgage/agecrypto"
+    "github.com/jenic/passgage/store"
+)
+
+engine, err := agecrypto.New(agecrypto.Config{
+    IdentityFile: "/home/me/.passage/identities",
+})
+if err != nil {
+    return err
+}
+s, err := store.Open(store.Config{
+    Dir: "/home/me/.passage/store",
+    Crypto: engine,
+})
+if err != nil {
+    return err
+}
+defer s.Close()
+
+plaintext, err := s.Read("mail/work")
+if err != nil {
+    return err
+}
+defer clear(plaintext)
+// Use plaintext without logging it.
+```
+
+`store.Initialize(store.InitOptions{Dir: ..., IdentityFile: ..., Passphrase: ...})`
+creates a new X25519 identity and root recipients policy without replacing existing
+files. `Open` only creates the directory when `Config.Create` is true. Listing
+requires no identities. For services, supply `Identities: []age.Identity{identity}`
+to `agecrypto.New` instead of `IdentityFile`; those sources are mutually exclusive.
+Successful identity unlocks are cached for the engine's lifetime. Closing a store
+releases its references; an engine retained by the caller keeps its cache.
+
+`Write`, `Copy`, `Move`, `Remove`, and `Reencrypt` acquire a writer lock automatically
+and return `(store.ChangeSet, error)`. Writes and copies require explicit
+`Overwrite: true` in their options to replace entries. Recursive removal requires
+`store.RemoveOptions{Recursive: true}`. `store.Generate` creates random password
+bytes from a passage-style character pattern.
+
+Use `s.Update(func(tx *store.Tx) error { ... })` to hold one lock across several
+reads and mutations. Inside the callback, use `tx` methods; calling back into `s`
+would deadlock. `tx.Changes()` returns completed changes for coordination with
+other code. The handle expires when the callback returns. Operations are atomic
+per file; `Update` does not roll back. Always inspect returned changes on error.
+Their paths include `.age` suffixes and any affected recipient policies.
+
+The library performs no automatic Git commits and reads no Passage environment
+settings. Configure recipient overrides through `store.Config.RecipientsFile` or
+`Recipients`; existing `.age-recipients` inheritance still applies. Encryption
+with explicit recipients needs no local identities, making write-only services
+possible. Logical entry names use `/` and omit `.age` on every platform.
+
+Encrypted identities use the caller's `agecrypto.Config.Prompt` callback. Plugins
+require `AllowedPlugins` and use an optional `PluginUI` for interaction. Without
+input callbacks, interactive operations fail. Caller-owned identity implementations
+must not be mutated during use; implementations that execute their own code remain
+the caller's responsibility. Engines and stores support concurrent operations;
+callbacks must not re-enter an operation holding the same engine or store lock.
+
+Use `errors.Is` and `errors.As` to inspect filesystem failures, `store.OpError`,
+`store.ErrInvalidName`, `store.ErrBusy`, `store.ErrClosed`,
+`agecrypto.ErrPluginNotAllowed`, and `agecrypto.ErrInteractionRequired`.
+Executable examples accompany both packages. Git, terminal editors, and clipboard
+integrations remain internal to the CLI.
+
 ## Shell completion
 
 Passgage supports entry, directory, command, and flag completion in Bash, Zsh,
