@@ -4,17 +4,20 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import subprocess
 import tempfile
 import unittest
 
 
 SCRIPT = Path(__file__).with_name("release.sh").resolve()
-ARCHIVES = [
-    f"passgage_{system}_{arch}.{extension}"
-    for system, extension in [("darwin", "tar.gz"), ("linux", "tar.gz"), ("windows", "zip")]
-    for arch in ["amd64", "arm64"]
-]
+# Archive names are project configuration; keep them in the release script only.
+ARCHIVES = shlex.split(re.search(r"(?ms)^archives=\((.*?)^\)", SCRIPT.read_text())[1], comments=True)
+ASSETS = [*ARCHIVES, "SHA256SUMS"]
+SIGNED_ASSETS = [*ASSETS, "provenance.sigstore.json", *(f"{name}.sigstore.json" for name in ASSETS)]
+REPOSITORY = "example/project"
+MODULE_PATH = f"github.com/{REPOSITORY}"
 
 # These fakes exercise control flow and argument handling, not cryptography.
 FAKE_TOOL = r'''#!/usr/bin/env python3
@@ -45,6 +48,24 @@ if tool == "cosign":
         wanted = [digest(blob), option("--certificate-identity"), option("--certificate-oidc-issuer")]
         if os.getenv("FAIL_VERIFY") or json.loads(bundle.read_text()) != wanted: sys.exit(1)
     else: sys.exit(1)
+elif args[:2] == ["attestation", "verify"]:
+    assert "--deny-self-hosted-runners" in args and option("--format") == "json"
+    data = json.loads(p(option("--bundle")).read_text())
+    wanted = {
+        "repo": option("--repo"), "identity": option("--cert-identity"),
+        "issuer": option("--cert-oidc-issuer"), "ref": option("--source-ref"),
+        "sha": option("--source-digest"),
+    }
+    if any(data[key] != value for key, value in wanted.items()) or not data["hosted"]:
+        sys.exit(1)
+    statement = data["statement"]
+    if statement["predicateType"] != option("--predicate-type"): sys.exit(1)
+    if not any(s["digest"].get("sha256") == digest(args[2]) for s in statement["subject"]):
+        sys.exit(1)
+    print(os.getenv("PROVENANCE_OUTPUT", json.dumps([{"verificationResult": {"statement": statement}}])))
+    # Emit valid output even on failure, to exercise the caller's pipefail handling.
+    if os.getenv("FAIL_PROVENANCE") or (os.getenv("FAIL_PROVENANCE_AFTER_DOWNLOAD") and (root / "downloaded").exists()):
+        sys.exit(1)
 elif args[0] == "api":
     if os.getenv("FAIL_API"): sys.exit(1)
     if "--paginate" in args:
@@ -70,10 +91,14 @@ elif args[:2] == ["release", "download"]:
     target = p(option("--dir"))
     shutil.copytree(remote, target, dirs_exist_ok=True)
     if os.getenv("TAMPER_DOWNLOAD"): (target / "SHA256SUMS.sigstore.json").write_text("[]")
+    if os.getenv("TAMPER_PROVENANCE_DOWNLOAD"): (target / "provenance.sigstore.json").write_text("{}")
+    if os.getenv("REENCODE_PROVENANCE_DOWNLOAD"):
+        bundle = target / "provenance.sigstore.json"
+        bundle.write_text(bundle.read_text() + "\n")
     (root / "downloaded").touch()
 elif args[:2] == ["release", "edit"]:
     assert "--draft=false" in args and state.read_text() == "draft"
-    assert len(list(remote.iterdir())) == 14
+    assert sorted(asset.name for asset in remote.iterdir()) == sorted(json.loads(os.environ["RELEASE_ASSETS"]))
     state.write_text("published")
 else: sys.exit(1)
 '''
@@ -84,7 +109,7 @@ class ReleaseTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        (self.root / "go.mod").write_text("module github.com/jenic/passgage\n")
+        (self.root / "go.mod").write_text(f"module {MODULE_PATH}\n")
         self.dist = self.root / "dist"
         self.dist.mkdir()
         for name in ARCHIVES:
@@ -98,12 +123,33 @@ class ReleaseTests(unittest.TestCase):
             path.chmod(0o755)
         self.env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", FIXTURE=str(self.root),
                         RELEASE_TAG="v1.2.3", GITHUB_SHA="a" * 40,
-                        GITHUB_REPOSITORY="jenic/passgage", GITHUB_SERVER_URL="https://github.com")
+                        GITHUB_REPOSITORY=REPOSITORY, GITHUB_SERVER_URL="https://github.com",
+                        RELEASE_ASSETS=json.dumps(SIGNED_ASSETS))
+        self.write_provenance()
 
     def write_checksums(self):
         (self.dist / "SHA256SUMS").write_text("".join(
             f"{hashlib.sha256((self.dist / name).read_bytes()).hexdigest()}  {name}\n"
             for name in ARCHIVES))
+
+    def write_provenance(self):
+        # This fake bundle is understood only by FAKE_TOOL; it is not a Sigstore bundle.
+        data = {
+            "repo": self.env["GITHUB_REPOSITORY"],
+            "identity": (self.env["GITHUB_SERVER_URL"] + "/" + self.env["GITHUB_REPOSITORY"]
+                         + "/.github/workflows/release.yml@refs/tags/" + self.env["RELEASE_TAG"]),
+            "issuer": "https://token.actions.githubusercontent.com",
+            "ref": "refs/tags/" + self.env["RELEASE_TAG"],
+            "sha": self.env["GITHUB_SHA"], "hosted": True,
+            "statement": {
+                "_type": "https://in-toto.io/Statement/v1",
+                "predicateType": "https://slsa.dev/provenance/v1",
+                "subject": [{"name": name, "digest": {
+                    "sha256": hashlib.sha256((self.dist / name).read_bytes()).hexdigest()
+                }} for name in ASSETS],
+            },
+        }
+        (self.dist / "provenance.sigstore.json").write_text(json.dumps(data))
 
     def run_release(self, command, success=True, **env):
         result = subprocess.run(["bash", str(SCRIPT), command, str(self.dist)],
@@ -122,7 +168,7 @@ class ReleaseTests(unittest.TestCase):
                 output = self.run_release("metadata", RELEASE_TAG=tag).stdout
                 self.assertIn(f"tag={tag}\n", output)
                 self.assertIn(f"prerelease={str(prerelease).lower()}\n", output)
-                self.assertIn("module_path=github.com/jenic/passgage\n", output)
+                self.assertIn(f"module_path={MODULE_PATH}\n", output)
         for tag in ["1.2.3", "v1", "v01.2.3", "v1.2.3-01", "v1.2.3-", "v1.2.3+", "v1.2.3\n",
                     "v1.2.3;echo bad", "v1.2.3+build-with-hyphen", "v1.2.3-0+build", "v1.2.3+incompatible"]:
             with self.subTest(tag=tag):
@@ -131,23 +177,23 @@ class ReleaseTests(unittest.TestCase):
 
     def test_module_path_and_major_version_validation(self):
         for module, tag, success in [
-            ("github.com/jenic/passgage", "v0.1.0", True),
-            ('"github.com/jenic/passgage"', "v1.0.0", True),
-            ("github.com/jenic/passgage", "v2.0.0", False),
-            ("github.com/jenic/passgage/v2", "v2.0.0", True),
-            ("github.com/jenic/passgage/v2", "v2.0.0-rc.1", True),
-            ("github.com/jenic/passgage/v2", "v1.0.0", False),
-            ("github.com/jenic/passgage/v2", "v3.0.0", False),
-            ("github.com/jenic/passgage/v0", "v0.1.0", False),
-            ("github.com/jenic/passgage/v1", "v1.0.0", False),
-            ("github.com/jenic/passgage/v02", "v2.0.0", False),
-            ("github.com/jenic/passgage/v10", "v10.0.0", True),
-            ("passgage", "v1.0.0", False),
+            (MODULE_PATH, "v0.1.0", True),
+            (f'"{MODULE_PATH}"', "v1.0.0", True),
+            (MODULE_PATH, "v2.0.0", False),
+            (f"{MODULE_PATH}/v2", "v2.0.0", True),
+            (f"{MODULE_PATH}/v2", "v2.0.0-rc.1", True),
+            (f"{MODULE_PATH}/v2", "v1.0.0", False),
+            (f"{MODULE_PATH}/v2", "v3.0.0", False),
+            (f"{MODULE_PATH}/v0", "v0.1.0", False),
+            (f"{MODULE_PATH}/v1", "v1.0.0", False),
+            (f"{MODULE_PATH}/v02", "v2.0.0", False),
+            (f"{MODULE_PATH}/v10", "v10.0.0", True),
+            (MODULE_PATH.rsplit("/", 1)[-1], "v1.0.0", False),
             ("", "v1.0.0", False),
-            ("github.com/jenic//passgage", "v1.0.0", False),
-            ("github.com/jenic/../passgage", "v1.0.0", False),
-            ("github.com/jenic/passgage.", "v1.0.0", False),
-            ("github.com/jenic/passgage extra", "v1.0.0", False),
+            (f"{MODULE_PATH}//extra", "v1.0.0", False),
+            (f"{MODULE_PATH}/../extra", "v1.0.0", False),
+            (f"{MODULE_PATH}.", "v1.0.0", False),
+            (f"{MODULE_PATH} extra", "v1.0.0", False),
         ]:
             with self.subTest(module=module, tag=tag):
                 (self.root / "go.mod").write_text(f"module {module}\n")
@@ -157,6 +203,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(self.calls(), [])
 
     def test_asset_set_and_checksums(self):
+        (self.dist / "provenance.sigstore.json").unlink()
         self.run_release("check-assets")
         for name in [ARCHIVES[0], "SHA256SUMS"]:
             path = self.dist / name
@@ -176,15 +223,17 @@ class ReleaseTests(unittest.TestCase):
 
     def test_signs_every_file_and_checks_annotated_tag(self):
         self.run_release("sign", ANNOTATED="1")
-        self.assertEqual(len(list(self.dist.iterdir())), 14)
-        self.assertEqual(sum(c[:2] == ["cosign", "sign-blob"] for c in self.calls()), 7)
-        self.assertEqual(sum(c[:2] == ["cosign", "verify-blob"] for c in self.calls()), 7)
+        self.assertEqual(len(list(self.dist.iterdir())), len(SIGNED_ASSETS))
+        self.assertEqual(sum(c[:3] == ["gh", "attestation", "verify"] for c in self.calls()), len(ASSETS))
+        self.assertEqual(sum(c[:2] == ["cosign", "sign-blob"] for c in self.calls()), len(ASSETS))
+        self.assertEqual(sum(c[:2] == ["cosign", "verify-blob"] for c in self.calls()), len(ASSETS))
 
     def test_signing_stops_on_tag_or_sigstore_failure(self):
         for failure in ["WRONG_SHA", "FAIL_API", "FAIL_SIGN", "FAIL_VERIFY"]:
             with self.subTest(failure=failure):
                 for bundle in self.dist.glob("*.sigstore.json"):
                     bundle.unlink()
+                self.write_provenance()
                 self.run_release("sign", success=False, **{failure: "1"})
         self.assertFalse((self.root / "state").exists())
 
@@ -192,7 +241,8 @@ class ReleaseTests(unittest.TestCase):
         self.run_release("sign")
         self.run_release("publish")
         self.assertEqual((self.root / "state").read_text(), "published")
-        self.assertEqual(len(list((self.root / "remote").iterdir())), 14)
+        self.assertEqual(len(list((self.root / "remote").iterdir())), len(SIGNED_ASSETS))
+        self.assertEqual(sum(c[:3] == ["gh", "attestation", "verify"] for c in self.calls()), 3 * len(ASSETS))
         edit = next(c for c in self.calls() if c[:3] == ["gh", "release", "edit"])
         self.assertIn("--prerelease=false", edit)
         calls_before = len(self.calls())
@@ -201,6 +251,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_prerelease_upload_failure_can_resume(self):
         self.env["RELEASE_TAG"] = "v1.2.3-rc.1"
+        self.write_provenance()
         self.run_release("sign")
         self.run_release("publish", success=False, FAIL_UPLOAD="1")
         self.assertEqual((self.root / "state").read_text(), "draft")
@@ -233,11 +284,97 @@ class ReleaseTests(unittest.TestCase):
 
     def test_download_verification_and_tag_movement_prevent_publication(self):
         self.run_release("sign")
-        for failure in ["TAMPER_DOWNLOAD", "MOVE_TAG_AFTER_DOWNLOAD"]:
+        for failure in ["TAMPER_DOWNLOAD", "MOVE_TAG_AFTER_DOWNLOAD", "TAMPER_PROVENANCE_DOWNLOAD",
+                        "FAIL_PROVENANCE_AFTER_DOWNLOAD", "REENCODE_PROVENANCE_DOWNLOAD"]:
             with self.subTest(failure=failure):
+                (self.root / "downloaded").unlink(missing_ok=True)
+                calls_before = len(self.calls())
                 self.run_release("publish", success=False, **{failure: "1"})
                 self.assertEqual((self.root / "state").read_text(), "draft")
+                self.assertTrue(any(c[:3] == ["gh", "release", "download"]
+                                    for c in self.calls()[calls_before:]))
         self.assertFalse(any(c[:3] == ["gh", "release", "edit"] for c in self.calls()))
+
+    def test_provenance_asset_modes(self):
+        self.run_release("check-assets", success=False)
+        result = subprocess.run(["bash", str(SCRIPT), "check-assets", str(self.dist), "attested"],
+                                cwd=self.root, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.run_release("verify-provenance")
+
+    def test_missing_malformed_or_symlinked_provenance_stops_signing(self):
+        bundle = self.dist / "provenance.sigstore.json"
+        for contents in [None, "", "{", "{}"]:
+            with self.subTest(contents=contents):
+                bundle.unlink(missing_ok=True)
+                if contents is not None:
+                    bundle.write_text(contents)
+                self.run_release("sign", success=False)
+        bundle.unlink()
+        bundle.symlink_to(self.dist / "SHA256SUMS")
+        self.run_release("sign", success=False)
+        self.assertFalse(any(c[:2] == ["cosign", "sign-blob"] for c in self.calls()))
+
+    def test_provenance_certificate_policy_stops_signing_and_publication(self):
+        self.run_release("sign")
+        bundle = self.dist / "provenance.sigstore.json"
+        original = json.loads(bundle.read_text())
+        failures = [("repo", "other/repository"), ("identity", "https://untrusted.example"),
+                    ("issuer", "https://untrusted.example"), ("ref", "refs/heads/main"),
+                    ("sha", "b" * 40), ("hosted", False)]
+        for field, value in failures:
+            with self.subTest(field=field):
+                changed = dict(original, **{field: value})
+                bundle.write_text(json.dumps(changed))
+                self.run_release("publish", success=False)
+        self.assertFalse((self.root / "state").exists())
+        # Check the same policy before any blob signing occurs.
+        for signature in self.dist.glob("*.sigstore.json"):
+            if signature != bundle:
+                signature.unlink()
+        calls_before = len(self.calls())
+        for field, value in failures:
+            bundle.write_text(json.dumps(dict(original, **{field: value})))
+            self.run_release("sign", success=False)
+        self.assertFalse(any(c[:2] == ["cosign", "sign-blob"] for c in self.calls()[calls_before:]))
+
+    def test_wrong_provenance_subjects_and_predicate_are_rejected(self):
+        self.run_release("sign")
+        bundle = self.dist / "provenance.sigstore.json"
+        original = bundle.read_text()
+        for mutation in ["missing", "extra", "duplicate", "renamed", "digest", "predicate", "type"]:
+            with self.subTest(mutation=mutation):
+                data = json.loads(original)
+                statement = data["statement"]
+                subjects = statement["subject"]
+                if mutation == "missing": subjects.pop()
+                elif mutation == "extra": subjects.append({"name": "extra", "digest": {"sha256": "0" * 64}})
+                elif mutation == "duplicate": subjects.append(subjects[0])
+                elif mutation == "renamed": subjects[0]["name"] = "wrong-name.tar.gz"
+                elif mutation == "digest": subjects[-1]["digest"]["sha256"] = "0" * 64
+                elif mutation == "predicate": statement["predicateType"] = "https://example.org/other"
+                elif mutation == "type": statement["_type"] = "https://in-toto.io/Statement/v0.1"
+                bundle.write_text(json.dumps(data))
+                self.run_release("publish", success=False)
+        self.assertFalse((self.root / "state").exists())
+
+    def test_provenance_verifier_failure_or_invalid_output_fails_closed(self):
+        self.run_release("sign", success=False, FAIL_PROVENANCE="1")
+        self.assertFalse(any(c[:2] == ["cosign", "sign-blob"] for c in self.calls()))
+        self.run_release("sign")
+        self.run_release("publish", success=False, FAIL_PROVENANCE="1")
+        for output in ["", "{", "null", "{}", "[]", "[{}]",
+                       '[{"verificationResult": {"statement": null}}]',
+                       '[{"verificationResult": {}}, {"verificationResult": {}}]']:
+            with self.subTest(output=output):
+                self.run_release("publish", success=False, PROVENANCE_OUTPUT=output)
+        self.assertFalse((self.root / "state").exists())
+
+    def test_changed_archives_with_updated_checksums_require_new_provenance(self):
+        (self.dist / ARCHIVES[0]).write_bytes(b"changed after build")
+        self.write_checksums()
+        self.run_release("sign", success=False)
+        self.assertFalse(any(c[:2] == ["cosign", "sign-blob"] for c in self.calls()))
 
 
 if __name__ == "__main__":

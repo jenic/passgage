@@ -2,6 +2,8 @@
 # Release automation only; never called by the passgage executable.
 set -euo pipefail
 
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
 fail() { echo "release: $*" >&2; exit 1; }
 
 validate_tag() {
@@ -53,14 +55,16 @@ archives=(
   passgage_windows_amd64.zip passgage_windows_arm64.zip
 )
 assets=("${archives[@]}" SHA256SUMS)
-signed_assets=("${assets[@]}")
+attested_assets=("${assets[@]}" provenance.sigstore.json)
+signed_assets=("${attested_assets[@]}")
 for asset in "${assets[@]}"; do signed_assets+=("$asset.sigstore.json"); done
 
 check_assets() (
   cd "$1"
   local mode=$2 expected actual asset
-  [[ $mode == unsigned || $mode == signed ]] || fail 'invalid asset mode'
+  [[ $mode == unsigned || $mode == attested || $mode == signed ]] || fail 'invalid asset mode'
   local files=("${assets[@]}")
+  if [[ $mode == attested ]]; then files=("${attested_assets[@]}"); fi
   if [[ $mode == signed ]]; then files=("${signed_assets[@]}"); fi
   expected=$(printf '%s\n' "${files[@]}" | LC_ALL=C sort)
   actual=$(find . -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)
@@ -94,16 +98,36 @@ verify_blob() {
     --certificate-oidc-issuer https://token.actions.githubusercontent.com "$1"
 }
 
+verify_provenance() (
+  cd "$1"
+  [[ -f provenance.sigstore.json && ! -L provenance.sigstore.json && -s provenance.sigstore.json ]] ||
+    fail 'missing or invalid provenance bundle'
+  local asset
+  for asset in "${assets[@]}"; do
+    # A failing verifier must fail the pipeline even if it emits valid JSON.
+    gh attestation verify "$asset" --bundle provenance.sigstore.json \
+      --repo "$GITHUB_REPOSITORY" \
+      --cert-identity "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/tags/$RELEASE_TAG" \
+      --cert-oidc-issuer https://token.actions.githubusercontent.com \
+      --predicate-type https://slsa.dev/provenance/v1 \
+      --source-ref "refs/tags/$RELEASE_TAG" --source-digest "$GITHUB_SHA" \
+      --deny-self-hosted-runners --format json |
+      python3 -B "$script_dir/verify_provenance.py" "${assets[@]}"
+  done
+)
+
 verify_signed() (
   check_assets "$1" signed
   cd "$1"
+  verify_provenance .
   for asset in "${assets[@]}"; do verify_blob "$asset"; done
 )
 
 sign_assets() (
   check_tag
-  check_assets "$1" unsigned
+  check_assets "$1" attested
   cd "$1"
+  verify_provenance .
   for asset in "${assets[@]}"; do
     cosign sign-blob --yes --oidc-provider github-actions --bundle "$asset.sigstore.json" "$asset"
     verify_blob "$asset"
@@ -146,7 +170,8 @@ case ${1:-} in
     printf 'tag=%s\nprerelease=%s\nmodule_path=%s\n' "$RELEASE_TAG" "$(prerelease)" "$module_path"
     ;;
   check-assets) check_assets "${2:?artifact directory required}" "${3:-unsigned}" ;;
+  verify-provenance) verify_provenance "${2:?artifact directory required}" ;;
   sign) sign_assets "${2:?artifact directory required}" ;;
   publish) publish "${2:?artifact directory required}" ;;
-  *) fail 'usage: release.sh metadata|check-assets|sign|publish [directory] [unsigned|signed]' ;;
+  *) fail 'usage: release.sh metadata|check-assets|verify-provenance|sign|publish [directory] [unsigned|attested|signed]' ;;
 esac

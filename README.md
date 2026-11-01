@@ -215,8 +215,9 @@ binary and are not added to release archives.
 
 ## Verifying downloads
 
-Each release contains six platform archives, `SHA256SUMS`, and a corresponding
-`<filename>.sigstore.json` bundle for each of those seven files. Archive names
+New releases contain six platform archives, `SHA256SUMS`, a corresponding
+`<filename>.sigstore.json` signature bundle for each of those seven files, and
+`provenance.sigstore.json`: 15 assets in total. Archive names
 remain `passgage_<os>_<arch>.tar.gz` for Linux/macOS and
 `passgage_windows_<arch>.zip` for Windows. GitHub's automatically generated source
 archives are not part of this signed set.
@@ -224,6 +225,15 @@ archives are not part of this signed set.
 Release artifacts are signed using GitHub Actions OIDC and the public Sigstore
 services. The signing identity and artifact digests are recorded in public
 transparency logs.
+
+The build job also generates SLSA v1 provenance, signed through Sigstore using
+GitHub artifact attestations. The provenance bundle covers the six archives and
+`SHA256SUMS` and links their digests to the source commit, release tag, workflow,
+and build invocation. This targets SLSA Build Level 2; the build and attestation
+run in the repository's release workflow. Publication requires successful
+verification of both provenance and the existing Cosign signatures, including
+verification of assets downloaded from the draft release. Older releases are
+not backfilled with provenance.
 
 To verify a download, install [Cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
 v3.0.6 or newer and download the archive, `SHA256SUMS`, and both corresponding
@@ -246,6 +256,40 @@ Use the exact release tag and workflow identity when verifying. Direct archive
 signature verification works for every platform; the final checksum command
 above uses GNU tools. See [Sigstore's verification documentation](https://docs.sigstore.dev/cosign/verifying/verify/)
 for the bundle format and identity checks.
+
+To check provenance as well, install a current
+[GitHub CLI](https://cli.github.com/) with `gh attestation verify` support and
+download `provenance.sigstore.json` from the same release. Using the variables
+from the example above, verify the archive and checksum manifest against the
+local bundle:
+
+```sh
+for file in "$asset" SHA256SUMS; do
+  gh attestation verify "$file" --bundle provenance.sigstore.json \
+    --repo jenic/passgage \
+    --cert-identity "$identity" --cert-oidc-issuer "$issuer" \
+    --predicate-type https://slsa.dev/provenance/v1 \
+    --source-ref "refs/tags/$tag" --deny-self-hosted-runners
+done
+```
+
+Alternatively, fetch the archive's attestation from GitHub:
+
+```sh
+gh attestation verify "$asset" --repo jenic/passgage \
+  --cert-identity "$identity" --cert-oidc-issuer "$issuer" \
+  --predicate-type https://slsa.dev/provenance/v1 \
+  --source-ref "refs/tags/$tag" --deny-self-hosted-runners
+```
+
+If you have independently obtained the expected source commit, add
+`--source-digest <trusted-commit-sha>` to these commands. Release automation
+always requires the triggering commit and verifies that the complete subject
+set contains exactly the seven expected filenames and SHA-256 digests. The
+provenance bundle carries its own attestation signature; it has no separate
+Cosign sidecar and is not included in `SHA256SUMS`.
+See the [GitHub CLI verification reference](https://cli.github.com/manual/gh_attestation_verify)
+for policy flags and bundle verification options.
 
 ## Commands
 
