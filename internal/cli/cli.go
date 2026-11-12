@@ -33,6 +33,7 @@ type app struct {
 }
 
 // New builds a command tree with injectable streams for testing.
+// Age plugin prompts use the process terminal independently of these streams.
 func New(in io.Reader, out, errout io.Writer) *cobra.Command {
 	a := &app{input: bufio.NewReader(in)}
 	root := &cobra.Command{Use: "passgage", Version: build.Version, Short: "Portable age-backed password store", SilenceUsage: true, SilenceErrors: true, Args: cobra.MaximumNArgs(1)}
@@ -177,20 +178,20 @@ func (a *app) confirm(prompt string, force bool) error {
 	return nil
 }
 func (a *app) engine(c cfg.Config) (*agecrypto.Engine, error) {
-	return agecrypto.New(agecrypto.Config{IdentityFile: c.Identities, AllowedPlugins: c.Plugins, Prompt: a.secret, PluginUI: &plugin.ClientUI{
-		DisplayMessage: func(name, msg string) error {
-			_, err := fmt.Fprintf(a.root.ErrOrStderr(), "%s: %s\n", name, msg)
-			return err
-		},
-		RequestValue: func(name, prompt string, secret bool) (string, error) { return a.secret(name + ": " + prompt) },
-		Confirm: func(name, prompt, yes, no string) (bool, error) {
-			v, err := a.secret(name + ": " + prompt + " [" + yes + "/" + no + "]")
-			return v == yes, err
-		},
-		WaitTimer: func(name string) {
-			fmt.Fprintf(a.root.ErrOrStderr(), "Waiting for %s; check your hardware token.\n", name)
-		},
-	}})
+	printf := func(format string, v ...any) {
+		fmt.Fprintf(a.root.ErrOrStderr(), format+"\n", v...)
+	}
+	// Keep plugin interaction separate from command input (which may contain
+	// entry data or be disconnected by a password-command consumer).
+	ui := plugin.NewTerminalUI(printf, printf)
+	ui.DisplayMessage = func(name, msg string) error {
+		_, err := fmt.Fprintf(a.root.ErrOrStderr(), "%s: %s\n", name, msg)
+		return err
+	}
+	ui.WaitTimer = func(name string) {
+		printf("Waiting for %s; check your hardware token.", name)
+	}
+	return agecrypto.New(agecrypto.Config{IdentityFile: c.Identities, AllowedPlugins: c.Plugins, Prompt: a.secret, PluginUI: ui})
 }
 func (a *app) openConfig(c cfg.Config, create bool) (*store.Store, error) {
 	engine, err := a.engine(c)

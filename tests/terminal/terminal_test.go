@@ -31,6 +31,8 @@ type result struct {
 	Restored bool
 	Residual []byte
 	Error    string
+	Stdout   string
+	Stderr   string
 }
 
 // The helper owns the controlling terminal before and after the real CLI.
@@ -51,8 +53,17 @@ func TestTerminalChild(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	cmd := exec.CommandContext(ctx, os.Getenv("PASSGAGE_BINARY"), args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	var stdout, stderr bytes.Buffer
+	if os.Getenv("PASSGAGE_TERMINAL_CAPTURE") == "1" {
+		cmd.Stdin = nil
+		if input := os.Getenv("PASSGAGE_TERMINAL_INPUT"); input != "" {
+			cmd.Stdin = strings.NewReader(input)
+		}
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	}
 	err = cmd.Run()
 	cancel()
+	r.Stdout, r.Stderr = stdout.String(), stderr.String()
 	if err != nil {
 		if cmd.ProcessState == nil {
 			r.Code = -1
@@ -124,12 +135,21 @@ func fixture(t *testing.T) *store.Store {
 
 func session(t *testing.T, args []string, keys, response string) (string, result) {
 	t.Helper()
+	return sessionWithPrompt(t, args, keys, response, "Ctrl+S save")
+}
+
+func sessionWithPrompt(t *testing.T, args []string, keys, response, prompt string) (string, result) {
+	t.Helper()
 	master, slave, err := pty.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer master.Close()
 	defer slave.Close()
+	initialState, err := term.GetState(int(slave.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := pty.Setsize(master, &pty.Winsize{Rows: 24, Cols: 80}); err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +201,23 @@ func session(t *testing.T, args []string, keys, response string) (string, result
 			_, _ = io.WriteString(master, response)
 			replied = true
 		}
-		if !sent && keys != "" && strings.Contains(text, "Ctrl+S save") {
+		if !sent && keys != "" && strings.Contains(text, prompt) {
+			// Prompts may be printed just before echo is disabled. Wait for
+			// the input mode before sending keys so PINs cannot race the prompt.
+			deadline := time.Now().Add(time.Second)
+			for {
+				state, err := term.GetState(int(slave.Fd()))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(state, initialState) {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("prompt did not enter terminal input mode")
+				}
+				time.Sleep(time.Millisecond)
+			}
 			_, _ = io.WriteString(master, keys)
 			sent = true
 		}

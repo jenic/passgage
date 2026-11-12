@@ -396,8 +396,21 @@ passgage --allow-age-plugin=yubikey show mail/work
 ```
 
 The corresponding `age-plugin-yubikey` must be installed on PATH. The official
-age plugin protocol handles token/PIN interaction. Listing, help, and completion
-do not require unlocking identities.
+age terminal UI handles plugin PINs, public input, and confirmations directly
+through `/dev/tty` on Unix or `CONIN$`/`CONOUT$` on Windows. Secret input is hidden;
+plugin diagnostics go to stderr, leaving stdout available for the entry.
+Plugin prompts work with redirected stdin and stdout as long as an interactive
+terminal is available. For example, with restic:
+
+```sh
+export PASSGAGE_AGE_PLUGINS=yubikey
+export RESTIC_PASSWORD_COMMAND="passgage Backups/key"
+```
+
+No shell wrapper or stdin redirection is required. Jobs without an interactive
+terminal fail if the plugin needs a PIN or other input. Encrypted identity and
+SSH-key passphrase prompts still require stdin to be a terminal. Listing, help,
+and completion do not require unlocking identities.
 
 `PASSAGE_AGE` is rejected for cryptographic operations. Bash extensions and their
 settings are unsupported. `PASSWORD_STORE_UMASK` does not relax permissions:
